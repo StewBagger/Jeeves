@@ -1,87 +1,106 @@
-import discord, datetime
+"""
+Auto Restart Extension
+Handles scheduled server restarts with countdown notifications.
+"""
+
+import datetime
+from typing import List
 from discord.ext import commands, tasks
 
+UTC = datetime.timezone.utc
 
-utc = datetime.timezone.utc
-scheduled_times = [
-    datetime.time(hour=1, minute=0, tzinfo=utc),
-    datetime.time(hour=5, minute=0, tzinfo=utc),
-    datetime.time(hour=9, minute=0, tzinfo=utc),
-    datetime.time(hour=13, minute=0, tzinfo=utc),
-    datetime.time(hour=17, minute=0, tzinfo=utc),
-    datetime.time(hour=21, minute=0, tzinfo=utc)
-]
-scheduled_times_10m = [
-    datetime.time(hour=0, minute=50, second=0, tzinfo=utc),
-    datetime.time(hour=4, minute=50, second=0, tzinfo=utc),
-    datetime.time(hour=8, minute=50, second=0, tzinfo=utc),
-    datetime.time(hour=12, minute=50, second=0, tzinfo=utc),
-    datetime.time(hour=16, minute=50, second=0, tzinfo=utc),
-    datetime.time(hour=20, minute=50, second=0, tzinfo=utc)
-]
-scheduled_times_5m = [
-    datetime.time(hour=0, minute=55, second=0, tzinfo=utc),
-    datetime.time(hour=4, minute=55, second=0, tzinfo=utc),
-    datetime.time(hour=8, minute=55, second=0, tzinfo=utc),
-    datetime.time(hour=12, minute=55, second=0, tzinfo=utc),
-    datetime.time(hour=16, minute=55, second=0, tzinfo=utc),
-    datetime.time(hour=20, minute=55, second=0, tzinfo=utc)
-]
-scheduled_times_1m = [
-    datetime.time(hour=0, minute=59, second=0, tzinfo=utc),
-    datetime.time(hour=4, minute=59, second=0, tzinfo=utc),
-    datetime.time(hour=8, minute=59, second=0, tzinfo=utc),
-    datetime.time(hour=12, minute=59, second=0, tzinfo=utc),
-    datetime.time(hour=16, minute=59, second=0, tzinfo=utc),
-    datetime.time(hour=20, minute=59, second=0, tzinfo=utc)
-]
-scheduled_times_10s = [
-    datetime.time(hour=0, minute=59, second=50, tzinfo=utc),
-    datetime.time(hour=4, minute=59, second=50, tzinfo=utc),
-    datetime.time(hour=8, minute=59, second=50, tzinfo=utc),
-    datetime.time(hour=12, minute=59, second=50, tzinfo=utc),
-    datetime.time(hour=16, minute=59, second=50, tzinfo=utc),
-    datetime.time(hour=20, minute=59, second=50, tzinfo=utc)
-]
 
-class SpecificTimeCog(commands.Cog):
+def _schedule(hours: List[int], minute: int, second: int = 0) -> List[datetime.time]:
+    return [datetime.time(hour=h, minute=minute, second=second, tzinfo=UTC) for h in hours]
+
+
+# Restart at 01:00, 05:00, 09:00, 13:00, 17:00, 21:00 UTC
+RESTART_HOURS = [1, 5, 9, 13, 17, 21]
+# Notifications fire 1 hour before
+NOTIFY_HOURS = [0, 4, 8, 12, 16, 20]
+
+
+class AutoRestartCog(commands.Cog):
+
     def __init__(self, bot):
         self.bot = bot
-        self.auto_restart.start()
-        self.restart_notification_10m.start()
-        self.restart_notification_5m.start()
-        self.restart_notification_1m.start()
-        self.restart_notification_10s.start()
+        for task in (self.auto_restart, self.notify_10m, self.notify_5m, self.notify_1m, self.notify_10s):
+            task.start()
+
     def cog_unload(self):
-        self.auto_restart.cancel()
-        self.restart_notification_10m.cancel()
-        self.restart_notification_5m.cancel()
-        self.restart_notification_1m.cancel()
-        self.restart_notification_10s.cancel()
+        for task in (self.auto_restart, self.notify_10m, self.notify_5m, self.notify_1m, self.notify_10s):
+            task.cancel()
 
-    @tasks.loop(time=scheduled_times)
+    # ---- Scheduled tasks ----
+
+    @tasks.loop(time=_schedule(RESTART_HOURS, minute=0))
     async def auto_restart(self):
-        await self.bot.auto_restart_main()
-        
-    @tasks.loop(time=scheduled_times_10m)
-    async def restart_notification_10m(self):
-        await self.bot.server_restart_10m()
-        
-    @tasks.loop(time=scheduled_times_5m)
-    async def restart_notification_5m(self):
-        await self.bot.server_restart_5m()
+        if self.bot.state.skip_next_restart:
+            import discord
+            self.bot.state.skip_next_restart = False
+            await self.bot.send_notification(
+                f"{self.bot.Emojis.JEEVES} Scheduled restart was skipped. Next restart will proceed as normal.",
+                discord.Colour.yellow()
+            )
+            print("[AutoRestart] Restart skipped.")
+            return
 
-    @tasks.loop(time=scheduled_times_1m)
-    async def restart_notification_1m(self):
-        await self.bot.server_restart_1m()
+        import discord
+        self.bot.state.auto_restart_pending = True
+        await self.bot.send_notification(
+            f"{self.bot.Emojis.SPIFFO_POP} Automatic Restart Initiated, this may take several minutes...",
+            discord.Colour.yellow()
+        )
+        await self.bot.restart_server()
 
-    @tasks.loop(time=scheduled_times_10s)
-    async def restart_notification_10s(self):
-        await self.bot.server_restart_10s()        
+    @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=50))
+    async def notify_10m(self):
+        if not self.bot.state.skip_next_restart:
+            await self._announce("10 Minutes", self.bot.Emojis.SPIFFO_WAVE)
+
+    @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=55))
+    async def notify_5m(self):
+        if not self.bot.state.skip_next_restart:
+            await self._announce("5 Minutes", self.bot.Emojis.SPIFFO_EDUCATE)
+
+    @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59))
+    async def notify_1m(self):
+        if not self.bot.state.skip_next_restart:
+            await self._announce("1 Minute", self.bot.Emojis.SPIFFO_KATANA)
+
+    @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59, second=50))
+    async def notify_10s(self):
+        if not self.bot.state.skip_next_restart:
+            await self._announce("10 Seconds", self.bot.Emojis.SPIFFO_STOP)
+
+    async def _announce(self, label: str, emoji: str):
+        import discord
+        msg = f"Server will automatically restart in {label}!"
+        await self.bot.send_notification(f"{emoji} {msg}", discord.Colour.yellow())
+        await self.bot.rcon.broadcast(msg)
+
+    # ---- Wait for ready ----
 
     @auto_restart.before_loop
-    async def before_my_task(self):
+    async def _wait_auto(self):
         await self.bot.wait_until_ready()
-        
+
+    @notify_10m.before_loop
+    async def _wait_10m(self):
+        await self.bot.wait_until_ready()
+
+    @notify_5m.before_loop
+    async def _wait_5m(self):
+        await self.bot.wait_until_ready()
+
+    @notify_1m.before_loop
+    async def _wait_1m(self):
+        await self.bot.wait_until_ready()
+
+    @notify_10s.before_loop
+    async def _wait_10s(self):
+        await self.bot.wait_until_ready()
+
+
 async def setup(bot):
-    await bot.add_cog(SpecificTimeCog(bot))
+    await bot.add_cog(AutoRestartCog(bot))
