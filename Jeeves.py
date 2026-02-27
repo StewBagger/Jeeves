@@ -39,6 +39,8 @@ try:
 except ImportError:
     sys.exit("ERROR: httpx package not installed. Install with: pip install httpx")
 
+import lua_bridge
+
 
 # =============================================================================
 # CONFIGURATION
@@ -61,11 +63,10 @@ class Config:
         self.CHANNEL_ID      = _env_int('DISCORD_CHANNEL_ID')
         self.GUILD_ID        = _env_int('DISCORD_GUILD_ID')
         self.TOKEN           = _env('DISCORD_TOKEN')
-        self.SERVER_BATCH    = _env('SERVER_BATCH', r'C:\SteamCMD\steamapps\common\Project Zomboid Dedicated Server\StartServer64.bat')
-        self.STEAM_API_KEY   = _env('STEAM_API_KEY')
-        self.SERVER_INI_PATH = _env('SERVER_INI_PATH', r'C:\Users\ut2k3\Zomboid\Server\servertest.ini')
-        self.UPDATE_LOG_PATH = _env('UPDATE_LOG_PATH', r'C:\Users\ut2k3\Desktop\Mod Update Log\mod_update_log.json')
-        self.MODS_FOLDER_PATH = _env('MODS_FOLDER_PATH', r'C:\SteamCMD\steamapps\workshop\content\108600')
+        self.SERVER_BATCH    = _env('SERVER_BATCH')
+        self.SERVER_INI_PATH = _env('SERVER_INI_PATH')
+        self.UPDATE_LOG_PATH = _env('UPDATE_LOG_PATH')
+        self.MODS_FOLDER_PATH = _env('MODS_FOLDER_PATH')
         self.SERVER_PROCESS_NAME = _env('SERVER_PROCESS_NAME', 'java.exe')
 
         # Timing
@@ -76,7 +77,7 @@ class Config:
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
         self.RANKS = {i: _env(f'RANK_{i}', f'Rank {i}') for i in range(1, 7)}
 
-        # Constants
+        # Steam Workshop API (no key required)
         self.STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 
         print(f"Config loaded: RCON={self.RCON_HOST}:{self.RCON_PORT} Guild={self.GUILD_ID} Channel={self.CHANNEL_ID}")
@@ -91,24 +92,30 @@ class Config:
             errors.append("DISCORD_GUILD_ID is not set")
         if not self.RCON_PASSWORD:
             errors.append("RCON_PASSWORD is not set")
+        if not self.SERVER_BATCH:
+            errors.append("SERVER_BATCH is not set (path to StartServer64.bat)")
+        if not self.SERVER_INI_PATH:
+            errors.append("SERVER_INI_PATH is not set (path to your server .ini)")
         return errors
 
 
 # =============================================================================
 # CUSTOM EMOJIS
+# Configure custom Discord emoji IDs in config.env, or leave blank for defaults.
+# Format: <:name:ID> for static, <a:name:ID> for animated
 # =============================================================================
 
 class Emojis:
-    HAPPY          = "<:pzhappy:1467224964829544449>"
-    DIZZY          = "<:pzdizzy:1467224682720923759>"
-    PANIC          = "<:pzpanic:1467224381385085263>"
-    ANGRY          = "<:pzangry:1467224612440903683>"
-    JEEVES         = "<:jeeves:1468333299524042895>"
-    SPIFFO_POP     = "<a:spiffopop:1467224894193275116>"
-    SPIFFO_WAVE    = "<:spiffowave:1467226773824733226>"
-    SPIFFO_EDUCATE = "<:spiffoeducate:1467226965789376552>"
-    SPIFFO_KATANA  = "<:spiffokatana:1467227039336763475>"
-    SPIFFO_STOP    = "<:spiffostop:1467226688017400023>"
+    HAPPY          = _env('EMOJI_HAPPY')          or "\U0001f7e2"   # 🟢
+    DIZZY          = _env('EMOJI_DIZZY')          or "\U0001f635"   # 😵
+    PANIC          = _env('EMOJI_PANIC')          or "\U0001f534"   # 🔴
+    ANGRY          = _env('EMOJI_ANGRY')          or "\u26d4"       # ⛔
+    JEEVES         = _env('EMOJI_JEEVES')         or "\U0001f9d1"   # 🧑
+    SPIFFO_POP     = _env('EMOJI_SPIFFO_POP')     or "\U0001f389"   # 🎉
+    SPIFFO_WAVE    = _env('EMOJI_SPIFFO_WAVE')    or "\U0001f44b"   # 👋
+    SPIFFO_EDUCATE = _env('EMOJI_SPIFFO_EDUCATE') or "\u2757"       # ❗
+    SPIFFO_KATANA  = _env('EMOJI_SPIFFO_KATANA')  or "\u26a0\ufe0f" # ⚠️
+    SPIFFO_STOP    = _env('EMOJI_SPIFFO_STOP')    or "\U0001f6d1"   # 🛑
 
 
 # =============================================================================
@@ -128,7 +135,7 @@ class ServerState:
         self.server_ready = False
         self.skip_next_restart = False
         self.last_rcon_ok = False
-        self.mod_update_running = False  # True while _mod_restart_sequence is active
+        self.mod_update_running = False
 
 
 # =============================================================================
@@ -149,7 +156,14 @@ class RCONHelper:
             return None
 
     async def broadcast(self, message: str) -> None:
+        """Send a red-alert servermsg + trigger alert sound via lua bridge.
+        Used by /msg, restart notifications, and mod update warnings.
+        The servermsg handles display (red alert text). The lua bridge
+        command tells the client mod to analyze and play the alert sound
+        only (soundOnly flag prevents duplicate chat panel display).
+        """
         await self.send_command(f'servermsg "{message}"')
+        await lua_bridge.broadcast(message, sound_only=True)
 
     async def save_and_quit(self) -> None:
         await self.send_command('save')
@@ -209,11 +223,11 @@ class ModChecker:
         return []
 
     async def _fetch_workshop_state(self, workshop_ids: List[str]) -> Dict:
-        """Fetch current update times from Steam API."""
+        """Fetch current update times from Steam API (no API key required)."""
         if not workshop_ids:
             return {}
 
-        data = {'itemcount': len(workshop_ids), 'format': 'json', 'key': self.config.STEAM_API_KEY}
+        data = {'itemcount': len(workshop_ids), 'format': 'json'}
         for i, item_id in enumerate(workshop_ids):
             data[f'publishedfileids[{i}]'] = item_id
 
@@ -319,7 +333,10 @@ class PZBot(commands.Bot):
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.config.GUILD_ID)
 
-        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay'):
+        # Initialize the Lua file bridge (must happen before extensions load)
+        lua_bridge.init(self)
+
+        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'server_update'):
             try:
                 await self.load_extension(ext)
                 print(f"Loaded {ext}")
@@ -443,38 +460,19 @@ class PZBot(commands.Bot):
 
     # ---- Mod Restart Logic ----
 
-    async def handle_mod_updates(self, *, manual: bool = False) -> bool:
-        """
-        Check for mod updates and start the restart sequence if needed.
-
-        Returns True if a restart sequence was kicked off, False otherwise.
-        The *manual* flag controls how a concurrent-run collision is handled:
-          - manual=False (hourly auto-check): fail silently — just return False.
-          - manual=True  (/mod command):      return False so the caller can
-                                              surface a message to the user.
-        """
-        # Guard against two routines running simultaneously
-        if self.state.mod_update_running:
-            if manual:
-                print("[ModCheck] /mod blocked — update routine already running.")
-            else:
-                print("[ModCheck] Auto-check skipped — update routine already running.")
-            return False
-
+    async def handle_mod_updates(self) -> None:
         updated = await self.mod_checker.check_for_updates()
         if not updated:
             self.state.auto_restart_pending = False
-            return False
+            return
         self.state.updated_mods = updated
         if self.state.auto_restart_pending:
             print("Auto restart pending, skipping mod restart.")
             self.state.auto_restart_pending = False
-            return False
+            return
         self.state.restart_task = asyncio.create_task(self._mod_restart_sequence())
-        return True
 
     async def _mod_restart_sequence(self) -> None:
-        self.state.mod_update_running = True
         try:
             await self.send_notification(
                 f"{Emojis.JEEVES} Mod update detected!", discord.Colour.purple(),
@@ -490,8 +488,6 @@ class PZBot(commands.Bot):
                 await self._immediate_restart()
         except asyncio.CancelledError:
             print("Mod update countdown cancelled.")
-        finally:
-            self.state.mod_update_running = False
 
     async def _restart_countdown(self, reason: str = None) -> None:
         EMPTY_CHECKS_REQUIRED = 3
@@ -608,10 +604,16 @@ def require_role(role_name: str):
 
 
 async def _send_error(interaction: discord.Interaction, embed: discord.Embed) -> None:
-    if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    else:
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.NotFound:
+        # Interaction expired (>3s) — nothing we can do
+        pass
+    except discord.HTTPException:
+        pass
 
 
 @bot.tree.error
@@ -713,8 +715,10 @@ async def cmd_teleport(interaction: discord.Interaction, player1: str, player2: 
 @bot.tree.command(name="msg", description="Broadcasts a message to the server.")
 @require_role(config.DEFAULT_ROLE)
 async def cmd_msg(interaction: discord.Interaction, message: str) -> None:
-    response = await bot.rcon.send_command(f'servermsg "{message}"')
-    await _respond(interaction, response or "Message sent")
+    await interaction.response.defer(ephemeral=True)
+    await bot.rcon.send_command(f'servermsg "{message}"')
+    embed = discord.Embed(title="Message sent", colour=discord.Colour.purple())
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="skip", description="Skip the next scheduled automatic restart.")
@@ -748,24 +752,8 @@ async def cmd_unskip(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="mod", description="Checks if the server's mods are up to date.")
 @require_role(config.DEFAULT_ROLE)
 async def cmd_mod(interaction: discord.Interaction) -> None:
-    if bot.state.mod_update_running:
-        await _respond(
-            interaction,
-            f"{Emojis.ANGRY} A mod update restart is already in progress — "
-            "please wait for the current sequence to complete.",
-            colour=discord.Colour.red()
-        )
-        return
-    await _respond(interaction, f"{Emojis.JEEVES} Checking mods...")
-    started = await bot.handle_mod_updates(manual=True)
-    if not started:
-        await interaction.followup.send(
-            embed=discord.Embed(
-                title=f"{Emojis.JEEVES} All mods are up to date. No restart needed.",
-                colour=discord.Colour.green()
-            ),
-            ephemeral=True
-        )
+    await _respond(interaction, "Checking mods...")
+    await bot.handle_mod_updates()
 
 
 @bot.tree.command(name="playerlist", description="Shows all players who have joined the server.")
@@ -853,10 +841,16 @@ async def cmd_cleanmods(interaction: discord.Interaction) -> None:
     app_commands.Choice(name="Chime Wrong",        value="11"),
 ])
 async def cmd_playsound(interaction: discord.Interaction, sound: app_commands.Choice[str], message: str = None) -> None:
-    tag = f"[PlaySound:{sound.value}]"
-    full = f"{tag} {message}" if message else tag
-    await bot.rcon.send_command(f'servermsg "{full}"')
-    await _respond(interaction, f"\U0001f50a Sound triggered: {sound.name}", description=f"Sent: *{full}*")
+    await interaction.response.defer(ephemeral=True)
+    success = await lua_bridge.playsound(int(sound.value), message)
+    desc = f"Sound: **{sound.name}**"
+    if message:
+        desc += f"\nMessage: *{message}*"
+    if success:
+        embed = discord.Embed(title="\U0001f50a Sound triggered!", description=desc, colour=discord.Colour.purple())
+    else:
+        embed = discord.Embed(title="Failed to trigger sound", description=desc, colour=discord.Colour.red())
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # =============================================================================

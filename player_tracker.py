@@ -32,7 +32,9 @@ from typing import Optional, Set
 import discord
 from discord.ext import commands, tasks
 
-_DEFAULT_LOG_PATH = r"C:\Users\ut2k3\Zomboid\Logs"
+import lua_bridge
+
+_DEFAULT_LOG_PATH = ""
 
 # ── DB ───────────────────────────────────────────────────────────────────────
 
@@ -109,6 +111,9 @@ class PlayerTrackerCog(commands.Cog):
         # within this join attempt, so we don't double-fire.
         self._pending_discord: Set[str] = set()
 
+        # Dedup guard for in-game welcome messages (name -> timestamp)
+        self._welcome_sent: dict = {}
+
         init_db()
         self._tail_user_log.start()
 
@@ -136,16 +141,24 @@ class PlayerTrackerCog(commands.Cog):
         )
         print(f"[PlayerTracker] Discord welcome sent -> {name}")
 
-    async def _delayed_rcon_broadcast(self, name: str, is_new: bool, delay: float = 10.0):
-        """Send an in-game RCON broadcast after *delay* seconds."""
+    async def _delayed_rcon_broadcast(self, name: str, is_new: bool, delay: float = 0.0):
+        """Send an in-game chat message."""
         await asyncio.sleep(delay)
+        # Dedup: skip if we already sent a welcome for this player recently
+        now = __import__('time').time()
+        last = self._welcome_sent.get(name, 0)
+        if now - last < 30:
+            print(f"[PlayerTracker] Skipping duplicate welcome for {name}")
+            return
+        self._welcome_sent[name] = now
+
         if is_new:
             msg = f"Welcome to the server, {name}! Enjoy your stay and be safe out there!"
         else:
             msg = f"Welcome back, {name}!"
-        await self.bot.rcon.broadcast(msg)
+        await lua_bridge.write_command("display", message=msg)
         label = "First-time" if is_new else "Returning"
-        print(f"[PlayerTracker] RCON broadcast ({label}) -> {name}")
+        print(f"[PlayerTracker] Lua display ({label}) -> {name}")
 
     # ── Main tail loop ────────────────────────────────────────────────────────
 

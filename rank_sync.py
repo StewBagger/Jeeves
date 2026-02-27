@@ -4,7 +4,7 @@ Rank Sync Extension for Jeeves Bot
 Monitors Discord role changes and syncs them to Project Zomboid
 by writing a Lua data file that the server mod reads.
 
-After writing, sends an RCON command to trigger the server mod
+After writing, uses the Lua file bridge to signal the server mod
 to reload and push ranks to all connected clients.
 
 The bot writes: {ZOMBOID_DATA_PATH}/Lua/jeeves_ranks.lua
@@ -20,6 +20,10 @@ Discord Roles -> In-Game Ranks:
 
 Players with none of these roles get Rank 0 (default, no color).
 The highest-tier role wins if a user has multiple rank roles.
+
+Permission model:
+    /linkme, /unlinkme  — any user (1-minute cooldown)
+    /setrank, /syncranks, /linkname, /unlinkname — DEFAULT_ROLE (Admin)
 """
 
 import json
@@ -29,6 +33,8 @@ from pathlib import Path
 from discord import app_commands
 from discord.ext import commands, tasks
 from typing import Optional, Dict
+
+import lua_bridge
 
 
 # Role name -> rank number mapping (highest wins)
@@ -131,9 +137,9 @@ class RankSync(commands.Cog):
     async def _push_ranks_to_server(self) -> None:
         """Tell the PZ server mod to reload ranks and push to all clients."""
         try:
-            await self.bot.rcon.send_command('servermsg "[JeevesRanks:push]"')
+            await lua_bridge.rank_push()
         except Exception as e:
-            print(f"[RankSync] RCON push error: {e}")
+            print(f"[RankSync] Lua bridge push error: {e}")
 
     def _update_rank(self, username: str, rank: int) -> bool:
         """Update a player's rank in memory and write to file."""
@@ -266,11 +272,110 @@ class RankSync(commands.Cog):
               f"{old_rank} -> {new_rank}")
         await self._update_rank_and_push(pz_username, new_rank)
 
-    # ---- Slash commands ----
+    # ====================================================================
+    # PUBLIC COMMANDS (no role requirement, 60s cooldown)
+    # ====================================================================
+
+    @app_commands.command(
+        name="linkme",
+        description="Link your own Discord account to your PZ username for rank syncing.",
+    )
+    @app_commands.describe(
+        username="Your Project Zomboid username (case-sensitive)",
+    )
+    @app_commands.checks.cooldown(1, 60.0)
+    async def cmd_linkme(
+        self,
+        interaction: discord.Interaction,
+        username: str,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        key = str(interaction.user.id)
+
+        if key in self._links:
+            current_name = self._links[key]
+            rank = get_rank_from_roles(interaction.user)
+            display = RANK_DISPLAY.get(rank, str(rank))
+            embed = discord.Embed(
+                title="\u26a0\ufe0f Already Linked",
+                description=(
+                    f"Your account is already linked to **{current_name}**.\n"
+                    f"**Current Rank:** {display}\n\n"
+                    "Each Discord account is limited to one linked character.\n"
+                    "If you need to change your link, run `/unlinkme` first, "
+                    "then use `/linkme` again with the new name."
+                ),
+                colour=discord.Colour.orange(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        self._links[key] = username
+        self._save_links()
+
+        rank = get_rank_from_roles(interaction.user)
+        await self._update_rank_and_push(username, rank)
+
+        display = RANK_DISPLAY.get(rank, str(rank))
+        embed = discord.Embed(
+            title="\U0001f517 Account Linked",
+            description=(
+                f"**PZ Username:** {username}\n"
+                f"**Current Rank:** {display}"
+            ),
+            colour=discord.Colour.blue(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="unlinkme",
+        description="Remove your own Discord-to-PZ username link.",
+    )
+    @app_commands.checks.cooldown(1, 60.0)
+    async def cmd_unlinkme(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        key = str(interaction.user.id)
+
+        if key not in self._links:
+            embed = discord.Embed(
+                title="Not Linked",
+                description=(
+                    "You don't have a PZ username linked.\n"
+                    "Use `/linkme` to link your account."
+                ),
+                colour=discord.Colour.greyple(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        old_name = self._links.pop(key)
+        self._save_links()
+
+        # Remove their rank from the file and push the change
+        if old_name in self._ranks:
+            del self._ranks[old_name]
+            self._write_ranks_file()
+            await self._push_ranks_to_server()
+
+        embed = discord.Embed(
+            title="\U0001f517 Account Unlinked",
+            description=(
+                f"Removed link to **{old_name}**.\n"
+                "You can now use `/linkme` to link a different character."
+            ),
+            colour=discord.Colour.orange(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ====================================================================
+    # ADMIN COMMANDS (require DEFAULT_ROLE)
+    # ====================================================================
 
     @app_commands.command(
         name="setrank",
-        description="Set a player's in-game rank (changes their chat name color)."
+        description="Set a player's in-game rank (changes their chat name color).",
     )
     @app_commands.describe(
         username="The player's PZ username (case-sensitive)",
@@ -291,6 +396,8 @@ class RankSync(commands.Cog):
         username: str,
         rank: app_commands.Choice[int],
     ):
+        await interaction.response.defer(ephemeral=True)
+
         success = await self._update_rank_and_push(username, rank.value)
         display = RANK_DISPLAY.get(rank.value, str(rank.value))
         if success:
@@ -305,11 +412,11 @@ class RankSync(commands.Cog):
                 description=f"Could not write rank file. Check ZOMBOID_DATA_PATH.",
                 colour=discord.Colour.red(),
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="syncranks",
-        description="Rebuild the rank file from all linked Discord members' roles and push to server."
+        description="Rebuild the rank file from all linked Discord members' roles and push to server.",
     )
     async def cmd_syncranks(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -335,7 +442,7 @@ class RankSync(commands.Cog):
 
     @app_commands.command(
         name="linkname",
-        description="Link a Discord user to their PZ username for rank syncing."
+        description="Link a Discord user to their PZ username for rank syncing.",
     )
     @app_commands.describe(
         member="The Discord user",
@@ -347,6 +454,8 @@ class RankSync(commands.Cog):
         member: discord.Member,
         username: str,
     ):
+        await interaction.response.defer(ephemeral=True)
+
         self._links[str(member.id)] = username
         self._save_links()
 
@@ -363,54 +472,11 @@ class RankSync(commands.Cog):
             ),
             colour=discord.Colour.blue(),
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(
-        name="linkme",
-        description="Link your own Discord account to your PZ username (one-time only)."
-    )
-    @app_commands.describe(
-        username="Your Project Zomboid username (case-sensitive)",
-    )
-    async def cmd_linkme(
-        self,
-        interaction: discord.Interaction,
-        username: str,
-    ):
-        key = str(interaction.user.id)
-
-        if key in self._links:
-            embed = discord.Embed(
-                title="\u26a0\ufe0f Already Linked",
-                description=(
-                    f"Your account is already linked to **{self._links[key]}**.\n"
-                    f"Contact an admin if you need to change this."
-                ),
-                colour=discord.Colour.orange(),
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        self._links[key] = username
-        self._save_links()
-
-        rank = get_rank_from_roles(interaction.user)
-        await self._update_rank_and_push(username, rank)
-
-        display = RANK_DISPLAY.get(rank, str(rank))
-        embed = discord.Embed(
-            title="\U0001f517 Account Linked",
-            description=(
-                f"**PZ Username:** {username}\n"
-                f"**Current Rank:** {display}"
-            ),
-            colour=discord.Colour.blue(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="unlinkname",
-        description="Remove the Discord-to-PZ username link for a user."
+        description="Remove the Discord-to-PZ username link for a user.",
     )
     @app_commands.describe(member="The Discord user to unlink")
     async def cmd_unlinkname(
@@ -418,6 +484,8 @@ class RankSync(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
     ):
+        await interaction.response.defer(ephemeral=True)
+
         key = str(member.id)
         if key in self._links:
             old_name = self._links.pop(key)
@@ -437,9 +505,18 @@ class RankSync(commands.Cog):
                 description=f"{member.mention} has no PZ username linked.",
                 colour=discord.Colour.greyple(),
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(RankSync(bot))
+    from Jeeves import require_role, config
+
+    cog = RankSync(bot)
+
+    # Apply Admin role requirement to admin-only commands
+    for cmd_name in ('cmd_setrank', 'cmd_syncranks', 'cmd_linkname', 'cmd_unlinkname'):
+        cmd = getattr(cog, cmd_name)
+        setattr(cog, cmd_name, require_role(config.DEFAULT_ROLE)(cmd))
+
+    await bot.add_cog(cog)
     print("[RankSync] Extension loaded.")

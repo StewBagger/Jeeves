@@ -10,7 +10,7 @@ Game -> Discord:
 
 Discord -> Game:
   - Listens for messages in the relay channel
-  - Forwards them to the PZ server via RCON servermsg
+  - Forwards them to the PZ server via Lua file bridge
 
 Config (config.env):
   CHAT_RELAY_CHANNEL_ID=  (Discord channel ID for the chat relay)
@@ -24,6 +24,8 @@ import discord
 from pathlib import Path
 from discord.ext import commands, tasks
 from typing import Optional
+
+import lua_bridge
 
 # Regex to strip PZ rich-text tags from author names
 RGB_TAG_RE = re.compile(r'<RGB:[^>]+>')
@@ -69,7 +71,7 @@ class ChatRelay(commands.Cog):
         self._channel_id = int(os.getenv('CHAT_RELAY_CHANNEL_ID', '0'))
         self._log_path = os.getenv(
             'CHAT_LOG_PATH',
-            r'C:\Users\ut2k3\Zomboid\Logs'
+            ''
         )
         self._file_pos = 0
         self._current_log = None
@@ -249,17 +251,12 @@ class ChatRelay(commands.Cog):
         if not message.content.strip():
             return
 
-        # Get display name
-        display_name = message.author.display_name
-
-        # Send to game via RCON
+        # Display in game chat via Lua bridge (no red alert text)
         try:
-            game_msg = f"[Discord] {display_name}: {message.content}"
-            # Escape quotes for RCON
-            game_msg = game_msg.replace('"', '\\"')
-            await self.bot.rcon.send_command(f'servermsg "{game_msg}"')
+            display_name = message.author.display_name
+            await lua_bridge.chat_relay(display_name, message.content)
         except Exception as e:
-            print(f"[ChatRelay] RCON relay error: {e}")
+            print(f"[ChatRelay] Relay error: {e}")
 
 
 async def setup(bot: commands.Bot):
