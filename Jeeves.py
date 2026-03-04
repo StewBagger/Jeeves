@@ -17,8 +17,23 @@ from typing import Optional, List, Dict
 
 try:
     from dotenv import load_dotenv
-    load_dotenv('config.env')
-    print("Loaded config.env")
+    # When compiled with PyInstaller, __file__ is inside _internal/.
+    # Check the exe's directory first, then fall back to the script directory.
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else _script_dir
+    _config_path = None
+    for _candidate in (
+        os.path.join(_exe_dir, 'config.env'),
+        os.path.join(_script_dir, 'config.env'),
+    ):
+        if os.path.isfile(_candidate):
+            _config_path = _candidate
+            break
+    if _config_path:
+        load_dotenv(_config_path)
+        print(f"Loaded {_config_path}")
+    else:
+        print(f"WARNING: config.env not found (searched {_exe_dir} and {_script_dir})")
 except ImportError:
     print("WARNING: python-dotenv not installed, using system env vars only.")
 except Exception as e:
@@ -69,9 +84,10 @@ class Config:
         self.MODS_FOLDER_PATH = _env('MODS_FOLDER_PATH')
         self.SERVER_PROCESS_NAME = _env('SERVER_PROCESS_NAME', 'java.exe')
 
-        # Timing
-        self.CHECK_INTERVAL = 30
-        self.STARTUP_WAIT = 60
+        # Timing (configurable — heavy/modded servers may need higher values)
+        self.STARTUP_WAIT = _env_int('STARTUP_WAIT', 120)
+        self.CHECK_INTERVAL = _env_int('CHECK_INTERVAL', 30)
+        self.MONITOR_RETRIES = _env_int('MONITOR_RETRIES', 20)
 
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
@@ -117,6 +133,9 @@ class Emojis:
     SPIFFO_KATANA  = _env('EMOJI_SPIFFO_KATANA')  or "\u26a0\ufe0f" # ⚠️
     SPIFFO_STOP    = _env('EMOJI_SPIFFO_STOP')    or "\U0001f6d1"   # 🛑
 
+# Debug: show what emoji values were loaded
+print(f"Emoji check: HAPPY={Emojis.HAPPY!r}  JEEVES={Emojis.JEEVES!r}")
+
 
 # =============================================================================
 # SERVER STATE
@@ -132,6 +151,7 @@ class ServerState:
         self.player_names: set = set()
         self.restart_task: Optional[asyncio.Task] = None
         self.is_restarting = False
+        self.is_starting = False
         self.server_ready = False
         self.skip_next_restart = False
         self.last_rcon_ok = False
@@ -336,7 +356,7 @@ class PZBot(commands.Bot):
         # Initialize the Lua file bridge (must happen before extensions load)
         lua_bridge.init(self)
 
-        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'server_update'):
+        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update'):
             try:
                 await self.load_extension(ext)
                 print(f"Loaded {ext}")
@@ -362,12 +382,42 @@ class PZBot(commands.Bot):
     # ---- Server Control ----
 
     async def start_server(self) -> None:
-        self.server_process = subprocess.Popen(self.config.SERVER_BATCH, creationflags=subprocess.CREATE_NEW_CONSOLE)
-        self._batch_pid = self.server_process.pid
-        print(f"Started server (PID: {self._batch_pid})")
-        await asyncio.sleep(self.config.STARTUP_WAIT)
-        await self.mod_checker.seed_state()
-        await self.monitor_until_online()
+        self.state.is_starting = True
+        try:
+            batch_dir = os.path.dirname(os.path.abspath(self.config.SERVER_BATCH))
+            self.server_process = subprocess.Popen(
+                self.config.SERVER_BATCH,
+                cwd=batch_dir,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            self._batch_pid = self.server_process.pid
+            print(f"[ServerControl] Started server (PID: {self._batch_pid}, cwd: {batch_dir})")
+
+            # Early health check — verify the process survives initial startup
+            for check in range(3):
+                await asyncio.sleep(5)
+                if self.server_process.poll() is not None:
+                    exit_code = self.server_process.returncode
+                    print(f"[ServerControl] Server process died during startup (exit code: {exit_code})")
+                    await self.send_notification(
+                        f"{Emojis.PANIC} Server failed to start! (exit code: {exit_code})",
+                        discord.Colour.red(),
+                        description="The server process exited before it could finish loading. "
+                                    "Check the server log for errors."
+                    )
+                    self.state.is_starting = False
+                    return
+                print(f"[ServerControl] Health check {check + 1}/3 — process alive")
+
+            # Wait for the server to fully load (Steam init, mods, map)
+            remaining_wait = max(0, self.config.STARTUP_WAIT - 15)  # subtract the 15s spent on health checks
+            print(f"[ServerControl] Waiting {remaining_wait}s for server to finish loading...")
+            await asyncio.sleep(remaining_wait)
+
+            await self.mod_checker.seed_state()
+            await self.monitor_until_online()
+        finally:
+            self.state.is_starting = False
 
     def discover_server_pid(self) -> None:
         """Find PID of an already-running server (bot restart scenario)."""
@@ -424,8 +474,19 @@ class PZBot(commands.Bot):
 
     # ---- Monitoring ----
 
-    async def monitor_until_online(self, max_retries: int = 12) -> bool:
+    async def monitor_until_online(self, max_retries: int = None) -> bool:
+        if max_retries is None:
+            max_retries = self.config.MONITOR_RETRIES
         for attempt in range(max_retries):
+            # Check process is still alive before trying RCON
+            if self.server_process and self.server_process.poll() is not None:
+                print(f"[ServerControl] Server process exited during monitoring (exit code: {self.server_process.returncode})")
+                await self.send_notification(
+                    f"{Emojis.PANIC} Server process died while waiting for it to come online!",
+                    discord.Colour.red()
+                )
+                return False
+
             if self.rcon.is_server_online():
                 await self.send_notification(f"{Emojis.HAPPY} Server is Online!", discord.Colour.green())
                 if not self.state.first_start:
@@ -438,8 +499,9 @@ class PZBot(commands.Bot):
                 print("[ServerControl] server_ready = True")
                 return True
             if attempt < max_retries - 1:
+                print(f"[ServerControl] RCON check {attempt + 1}/{max_retries} failed, retrying in {self.config.CHECK_INTERVAL}s...")
                 await self.send_notification(
-                    f"{Emojis.PANIC} Server Offline! Retrying in {self.config.CHECK_INTERVAL}s...",
+                    f"{Emojis.PANIC} Server Offline! Retrying in {self.config.CHECK_INTERVAL}s... ({attempt + 1}/{max_retries})",
                     discord.Colour.red()
                 )
                 await asyncio.sleep(self.config.CHECK_INTERVAL)
@@ -888,7 +950,7 @@ async def cmd_myrank(interaction: discord.Interaction) -> None:
 # ENTRY POINT
 # =============================================================================
 
-LOCK_FILE = Path(__file__).parent / "jeeves.lock"
+LOCK_FILE = Path(sys.executable).parent / "jeeves.lock" if getattr(sys, 'frozen', False) else Path(__file__).parent / "jeeves.lock"
 
 
 def enforce_single_instance() -> None:

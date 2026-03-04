@@ -104,9 +104,17 @@ async def _write_file(filepath: Path, lock: asyncio.Lock, content: str, label: s
     """Write content to a file with lock and retry logic."""
     async with lock:
         # Wait for the mod to consume any previous command file.
+        # The PZ mod "deletes" by overwriting with empty content (PZ has no
+        # os.remove), so we check for empty OR missing file as "consumed".
         # The mod polls every ~0.5s, so 10 attempts × 0.5s = 5s max wait.
         for attempt in range(10):
             if not filepath.exists():
+                break
+            try:
+                size = filepath.stat().st_size
+                if size == 0:
+                    break  # Mod consumed the previous command (wrote empty file)
+            except OSError:
                 break
             await asyncio.sleep(0.5)
         else:

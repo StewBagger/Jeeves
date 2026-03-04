@@ -64,10 +64,10 @@ class ModCheckCog(commands.Cog):
         """
         Lightweight RCON ping.  Calls poll_players() which writes
         bot.state.last_rcon_ok True on success, False on failure.
-        Skipped while a restart is in progress so we don't spam errors
-        during intentional downtime.
+        Skipped while a restart or startup is in progress so we don't
+        spam errors during intentional downtime.
         """
-        if not self.bot.state.server_ready or self.bot.state.is_restarting:
+        if not self.bot.state.server_ready or self.bot.state.is_restarting or self.bot.state.is_starting:
             return
         await self.bot.poll_players()
 
@@ -82,8 +82,8 @@ class ModCheckCog(commands.Cog):
 
     @tasks.loop(seconds=90.0)
     async def crash_monitor(self):
-        # Don't run during intentional restarts or before the server is up
-        if not self.bot.state.server_ready or self.bot.state.is_restarting:
+        # Don't run during intentional restarts, startup, or before the server is up
+        if not self.bot.state.server_ready or self.bot.state.is_restarting or self.bot.state.is_starting:
             self.consecutive_failures = 0
             return
 

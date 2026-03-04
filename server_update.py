@@ -38,6 +38,16 @@ class ServerUpdateCog(commands.Cog):
         self._update_in_progress = False
         print(f"[ServerUpdate] Extension loaded. SteamCMD: {self._steamcmd_path}")
 
+    def _install_dir(self) -> str:
+        """Derive server install root from MODS_FOLDER_PATH.
+        MODS_FOLDER_PATH = .../steamapps/workshop/content/108600
+        Install dir      = .../  (4 levels up)"""
+        mods_path = getattr(self.bot.config, 'MODS_FOLDER_PATH', '')
+        if mods_path:
+            from pathlib import Path
+            return str(Path(mods_path).parent.parent.parent.parent)
+        return ""
+
     # ------------------------------------------------------------------ #
     # SteamCMD runner                                                      #
     # ------------------------------------------------------------------ #
@@ -59,8 +69,11 @@ class ServerUpdateCog(commands.Cog):
                 ))
             return False
 
-        cmd = [
-            self._steamcmd_path,
+        cmd = [self._steamcmd_path]
+        install_dir = self._install_dir()
+        if install_dir:
+            cmd += ["+force_install_dir", install_dir]
+        cmd += [
             "+login", "anonymous",
             "+app_update", _UPDATE_APP_ID, "-beta", _UPDATE_BETA, "validate",
             "+quit",
