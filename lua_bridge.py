@@ -354,3 +354,61 @@ def read_drops_status() -> dict | None:
     except Exception as e:
         print(f"[LuaBridge] Failed to read drops status: {e}")
         return None
+
+
+WORLD_STATUS_FILE = "jeeves_world_status.lua"
+
+
+def read_world_status() -> dict | None:
+    """Read the world status file written by JeevesWorldStatus.lua.
+    Returns the parsed Lua table as a dict, or None if unavailable.
+    Non-async because it's a simple file read."""
+    if _lua_dir is None:
+        return None
+
+    filepath = _lua_dir / WORLD_STATUS_FILE
+    if not filepath.exists():
+        return None
+
+    try:
+        text = filepath.read_text(encoding='utf-8').strip()
+        if not text:
+            return None
+
+        inner = text
+        if inner.startswith("return"):
+            inner = inner[6:].strip()
+        if inner.startswith("{"):
+            inner = inner[1:]
+        if inner.endswith("}"):
+            inner = inner[:-1]
+
+        result = {}
+        for line in inner.split('\n'):
+            line = line.strip().rstrip(',')
+            if '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip()
+            val = val.strip()
+
+            if val.startswith('"') and val.endswith('"'):
+                result[key] = val[1:-1]
+            elif val == "true":
+                result[key] = True
+            elif val == "false":
+                result[key] = False
+            else:
+                try:
+                    result[key] = int(val)
+                except ValueError:
+                    try:
+                        result[key] = float(val)
+                    except ValueError:
+                        result[key] = val
+
+        return result if result else None
+
+    except Exception as e:
+        print(f"[LuaBridge] Failed to read world status: {e}")
+        return None

@@ -1,57 +1,69 @@
 @echo off
+REM ============================================================================
+REM  JeevesBot Build Script
+REM  Compiles Jeeves into a standalone executable using PyInstaller.
+REM ============================================================================
+REM
+REM  Prerequisites:
+REM    1. Python 3.10+ installed and on PATH
+REM    2. Run once:  pip install -r requirements.txt
+REM
+REM  Usage:
+REM    Double-click build.bat from the JeevesBot folder.
+REM    Output:  dist\Jeeves\Jeeves.exe
+REM
+REM  After building:
+REM    1. Copy the entire dist\Jeeves\ folder to your server
+REM    2. Place config.env next to Jeeves.exe
+REM    3. Run Jeeves.exe
+REM ============================================================================
+
+echo.
 echo ============================================
-echo  JeevesBot Build Script
+echo   JeevesBot Build Script
 echo ============================================
 echo.
 
-REM Check Python is available
+REM Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python is not installed or not in PATH.
-    echo Download Python from https://www.python.org/downloads/
-    echo Make sure to check "Add Python to PATH" during installation.
+    echo ERROR: Python not found on PATH.
+    echo Install Python 3.10+ from https://python.org
     pause
     exit /b 1
 )
 
-echo [1/3] Installing dependencies...
-echo Removing obsolete backport packages...
-python -m pip uninstall typing pathlib configparser importlib-metadata functools32 enum34 -y >nul 2>&1
-python -m pip install -r requirements.txt --quiet
+REM Install dependencies (includes PyInstaller)
+echo Installing/verifying dependencies...
+python -m pip install -r requirements.txt
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     pause
     exit /b 1
 )
 
-echo [2/3] Building executable...
+echo.
+echo Building Jeeves.exe...
+echo.
+
+REM Use "python -m PyInstaller" instead of bare "pyinstaller" command
+REM to avoid PATH issues with Windows Store Python and user-level installs
 python -m PyInstaller Jeeves.spec --noconfirm --clean
+
 if errorlevel 1 (
-    echo ERROR: PyInstaller build failed.
+    echo.
+    echo ERROR: Build failed! Check output above.
     pause
     exit /b 1
 )
 
-echo [3/3] Packaging distribution...
-
-REM Copy config example into the dist folder
-copy /Y config.env.example dist\Jeeves\config.env.example >nul
-copy /Y README.md dist\Jeeves\README.md >nul
-
-REM Create empty config.env if it doesn't exist in dist
-if not exist dist\Jeeves\config.env (
-    copy /Y config.env.example dist\Jeeves\config.env >nul
-)
+REM Copy config to output
+if exist "config.env.example" copy /y "config.env.example" "dist\Jeeves\config.env.example" >nul
 
 echo.
 echo ============================================
-echo  BUILD COMPLETE
+echo   Build complete!
+echo   Output: dist\Jeeves\Jeeves.exe
 echo ============================================
-echo.
-echo Distribution folder: dist\Jeeves\
-echo.
-echo To distribute:
-echo   1. Zip the dist\Jeeves\ folder
-echo   2. Users extract, edit config.env, run Jeeves.exe
 echo.
 pause

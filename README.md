@@ -136,6 +136,18 @@ Edit `config.env` with a text editor (Notepad works fine). Every line that says 
 | `DEFAULT_ROLE` | Discord role name required to use admin commands (default: "Admin") |
 | `RANK_1` through `RANK_6` | Discord role names that map to in-game rank colors |
 
+### Startup Timing (Optional)
+
+If your server is heavily modded or has large maps, it may need more time to start up before the bot begins checking RCON. These settings are optional — the defaults work for most servers.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `STARTUP_WAIT` | `120` | Seconds to wait after launching the server before polling RCON |
+| `CHECK_INTERVAL` | `30` | Seconds between RCON retry attempts during startup monitoring |
+| `MONITOR_RETRIES` | `20` | Number of RCON retries before giving up (total wait = STARTUP_WAIT + CHECK_INTERVAL × MONITOR_RETRIES) |
+
+For a very large server with many mods and 16+ GB heap, you might want `STARTUP_WAIT=180` and `MONITOR_RETRIES=30`.
+
 ### Custom Emojis (Optional)
 
 By default, the bot uses standard Unicode emoji in its messages. If you want custom emoji (like the Project Zomboid Spiffo emotes), upload them to your Discord server, then add their IDs to config.env:
@@ -301,6 +313,21 @@ Discord can take up to an hour to propagate slash commands after the bot's first
 
 - `SERVER_BATCH` must point to the exact `.bat` file you use to start your server
 - The bot must run with the same permissions as the server (if the server runs as Administrator, the bot needs to as well)
+- Make sure your batch file includes `@cd /d "%~dp0"` as the first line — this ensures the server runs from the correct directory regardless of how it's launched
+
+### Server crashes when started by the bot but works when started manually
+
+This is usually a timing issue. The bot may start polling RCON before the server has finished initializing Steam and loading mods, which can interfere with startup on heavily modded servers. Try increasing `STARTUP_WAIT` in config.env:
+
+```
+STARTUP_WAIT=180
+MONITOR_RETRIES=30
+```
+
+If the server still crashes immediately (within seconds of launching), check:
+- That no other `java.exe` process is still running from a previous server instance
+- That no other application is using your server's ports (run `netstat -ano | findstr :16261` in an admin Command Prompt)
+- That your antivirus/firewall isn't blocking a Java process spawned by another application
 
 ### Mod updates not detecting
 

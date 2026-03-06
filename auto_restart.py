@@ -24,6 +24,7 @@ class AutoRestartCog(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self._horde_defer_active = False
         for task in (self.auto_restart, self.notify_10m, self.notify_5m, self.notify_1m, self.notify_10s):
             task.start()
 
@@ -45,6 +46,25 @@ class AutoRestartCog(commands.Cog):
             print("[AutoRestart] Restart skipped.")
             return
 
+        if self._horde_defer_active:
+            import discord, asyncio
+            # Already deferred at the 10m mark. Wait for horde to clear.
+            print("[AutoRestart] Restart deferred for horde, polling until clear...")
+            while True:
+                await asyncio.sleep(300)
+                blocked, reason = self.bot._is_horde_blocking_restart()
+                if not blocked:
+                    self._horde_defer_active = False
+                    print("[AutoRestart] Horde cleared, proceeding with restart.")
+                    await self.bot.send_notification(
+                        f"{self.bot.Emojis.JEEVES} Horde event concluded — proceeding with scheduled restart.",
+                        discord.Colour.yellow()
+                    )
+                    await self.bot.rcon.broadcast(
+                        "Horde event concluded. Server restarting now."
+                    )
+                    break
+
         import discord
         self.bot.state.auto_restart_pending = True
         await self.bot.send_notification(
@@ -55,22 +75,41 @@ class AutoRestartCog(commands.Cog):
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=50))
     async def notify_10m(self):
-        if not self.bot.state.skip_next_restart:
-            await self._announce("10 Minutes", self.bot.Emojis.SPIFFO_WAVE)
+        if self.bot.state.skip_next_restart:
+            return
+        # Horde guard: check current AND projected in-game time.
+        # With 1 day = 2 hours, 10 real minutes = 2 in-game hours.
+        # If a horde is active or the window will be active at restart
+        # time, defer the entire countdown.
+        blocked, reason = self.bot._is_horde_blocking_restart(real_minutes_ahead=10)
+        if blocked:
+            import discord
+            self._horde_defer_active = True
+            print(f"[AutoRestart] Horde guard at 10m: {reason}")
+            await self.bot.send_notification(
+                f"{self.bot.Emojis.JEEVES} Scheduled restart deferred — {reason}. Will restart after the event.",
+                discord.Colour.orange()
+            )
+            await self.bot.rcon.broadcast(
+                "Scheduled restart deferred — horde night approaching. Server will restart after the event."
+            )
+            return
+        self._horde_defer_active = False
+        await self._announce("10 Minutes", self.bot.Emojis.SPIFFO_WAVE)
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=55))
     async def notify_5m(self):
-        if not self.bot.state.skip_next_restart:
+        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
             await self._announce("5 Minutes", self.bot.Emojis.SPIFFO_EDUCATE)
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59))
     async def notify_1m(self):
-        if not self.bot.state.skip_next_restart:
+        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
             await self._announce("1 Minute", self.bot.Emojis.SPIFFO_KATANA)
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59, second=50))
     async def notify_10s(self):
-        if not self.bot.state.skip_next_restart:
+        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
             await self._announce("10 Seconds", self.bot.Emojis.SPIFFO_STOP)
 
     async def _announce(self, label: str, emoji: str):

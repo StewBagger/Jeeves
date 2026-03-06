@@ -1,50 +1,45 @@
 # -*- mode: python ; coding: utf-8 -*-
-# JeevesBot PyInstaller spec file
-# Run with: pyinstaller Jeeves.spec
+"""
+Jeeves.spec — PyInstaller build specification for JeevesBot.
+
+Build with:   pyinstaller Jeeves.spec
+Or use:       build.bat
+
+Output:       dist/Jeeves/Jeeves.exe
+"""
 
 import os
 
 block_cipher = None
 
-# Collect all .py files in the bot directory as data files for cog loading
-cog_files = [
-    ('auto_restart.py', '.'),
-    ('chat_relay.py', '.'),
-    ('jeeves_drops.py', '.'),
-    ('jeeves_events.py', '.'),
-    ('lua_bridge.py', '.'),
-    ('mod_check_timer.py', '.'),
-    ('player_tracker.py', '.'),
-    ('rank_sync.py', '.'),
-    ('server_update.py', '.'),
-    ('config.env.example', '.'),
+# Cog modules loaded dynamically via bot.load_extension() — PyInstaller
+# can't auto-detect these, so they must be listed as hidden imports.
+hidden_imports = [
+    'auto_restart',
+    'mod_check_timer',
+    'player_tracker',
+    'rank_sync',
+    'chat_relay',
+    'jeeves_events',
+    'jeeves_drops',
+    'jeeves_modsorter',
+    'jeeves_modmanager',
+    'server_update',
+    'server_status',
+    'lua_bridge',
+    'mod_sorter',
 ]
 
+spec_dir = os.path.dirname(os.path.abspath(SPEC))
+
 a = Analysis(
-    ['Jeeves.py'],
-    pathex=[],
+    [os.path.join(spec_dir, 'Jeeves.py')],
+    pathex=[spec_dir],
     binaries=[],
-    datas=cog_files,
-    hiddenimports=[
-        'discord',
-        'discord.ext.commands',
-        'discord.ext.tasks',
-        'discord.app_commands',
-        'rcon',
-        'rcon.source',
-        'httpx',
-        'dotenv',
-        'sqlite3',
-        'auto_restart',
-        'chat_relay',
-        'jeeves_drops',
-        'jeeves_events',
-        'lua_bridge',
-        'mod_check_timer',
-        'player_tracker',
-        'rank_sync',
-        'server_update',
+    datas=[
+        (os.path.join(spec_dir, 'config.env.example'), '.'),
     ],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -68,7 +63,11 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
-    icon=None,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
 )
 
 coll = COLLECT(

@@ -91,18 +91,11 @@ class JeevesHordesCog(commands.Cog):
                 return
 
             if phase == "scheduled":
-                embed = discord.Embed(
-                    title="\U0001f319 Horde Night Approaches!",
-                    description=(
-                        "The dead stir restlessly... **Horde Night** has been "
-                        "scheduled for tonight.\n\n"
-                        "Prepare your defenses. Consume **Zombie Stew** for immunity."
-                    ),
-                    colour=discord.Colour.orange()
-                )
-                await channel.send(embed=embed)
+                # Don't send Discord notifications for "scheduled" — this fires
+                # on every server boot when the horde mod writes its initial status.
+                # Players get the in-game moodle on horde day. Only notify Discord
+                # for active (horde started) and ended (horde complete) events.
                 self._sent_phases.add(key)
-                print(f"[JeevesHordes] Notification sent: scheduled, eventDay={event_day}")
 
             elif phase == "active":
                 total = status.get("totalZombies", "?")

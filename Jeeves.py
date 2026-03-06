@@ -82,7 +82,7 @@ class Config:
         self.SERVER_INI_PATH = _env('SERVER_INI_PATH')
         self.UPDATE_LOG_PATH = _env('UPDATE_LOG_PATH')
         self.MODS_FOLDER_PATH = _env('MODS_FOLDER_PATH')
-        self.SERVER_PROCESS_NAME = _env('SERVER_PROCESS_NAME', 'java.exe')
+        self.SERVER_PROCESS_NAME = _env('SERVER_PROCESS_NAME', 'java.exe' if sys.platform == 'win32' else 'java')
 
         # Timing (configurable — heavy/modded servers may need higher values)
         self.STARTUP_WAIT = _env_int('STARTUP_WAIT', 120)
@@ -109,7 +109,7 @@ class Config:
         if not self.RCON_PASSWORD:
             errors.append("RCON_PASSWORD is not set")
         if not self.SERVER_BATCH:
-            errors.append("SERVER_BATCH is not set (path to StartServer64.bat)")
+            errors.append("SERVER_BATCH is not set (path to StartServer64.bat or start-server.sh)")
         if not self.SERVER_INI_PATH:
             errors.append("SERVER_INI_PATH is not set (path to your server .ini)")
         return errors
@@ -317,21 +317,52 @@ class ModChecker:
 
 
 # =============================================================================
-# WINDOWS PROCESS HELPERS
+# CROSS-PLATFORM PROCESS HELPERS
 # =============================================================================
 
+_IS_WINDOWS = sys.platform == "win32"
+
 def _tasklist(filter_str: str, timeout: int = 10) -> str:
-    """Run tasklist with the given filter and return output."""
-    try:
-        return subprocess.check_output(
-            f'tasklist /FI "{filter_str}" /NH', shell=True, text=True, timeout=timeout
-        )
-    except Exception:
-        return ""
+    """Run tasklist (Windows) or ps (Linux) with the given filter and return output."""
+    if _IS_WINDOWS:
+        try:
+            return subprocess.check_output(
+                f'tasklist /FI "{filter_str}" /NH', shell=True, text=True, timeout=timeout
+            )
+        except Exception:
+            return ""
+    else:
+        # On Linux, parse the filter string for the process name or PID
+        try:
+            return subprocess.check_output(
+                ['ps', 'aux'], text=True, timeout=timeout
+            )
+        except Exception:
+            return ""
 
 def _taskkill(target: str) -> None:
-    """Run taskkill silently."""
-    os.system(f'taskkill /f {target} 2>nul')
+    """Kill a process. On Windows uses taskkill, on Linux uses kill."""
+    if _IS_WINDOWS:
+        os.system(f'taskkill /f {target} 2>nul')
+    else:
+        # Extract PID from target string if present
+        import re
+        pid_match = re.search(r'/pid\s+(\d+)', target)
+        im_match = re.search(r'/im\s+"?([^"]+)"?', target)
+        if pid_match:
+            pid = int(pid_match.group(1))
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        elif im_match:
+            proc_name = im_match.group(1)
+            try:
+                subprocess.run(['pkill', '-f', proc_name],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -356,7 +387,7 @@ class PZBot(commands.Bot):
         # Initialize the Lua file bridge (must happen before extensions load)
         lua_bridge.init(self)
 
-        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update'):
+        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update', 'server_status'):
             try:
                 await self.load_extension(ext)
                 print(f"Loaded {ext}")
@@ -385,11 +416,39 @@ class PZBot(commands.Bot):
         self.state.is_starting = True
         try:
             batch_dir = os.path.dirname(os.path.abspath(self.config.SERVER_BATCH))
-            self.server_process = subprocess.Popen(
-                self.config.SERVER_BATCH,
+
+            # When running as a PyInstaller exe, the bundled runtime sets env
+            # vars (_MEIPASS, modified PATH, etc.) that can interfere with the
+            # PZ server's Java process. Build a clean environment for the child.
+            env = os.environ.copy()
+            if getattr(sys, 'frozen', False):
+                # Remove PyInstaller-specific variables
+                for key in ('_MEIPASS', '_MEIPASS2', '_PYI_SPLASH_IPC'):
+                    env.pop(key, None)
+                # Restore PATH: remove any temp extraction directories
+                # PyInstaller temp dirs look like _MEIxxxxx
+                if 'PATH' in env:
+                    clean_path = os.pathsep.join(
+                        p for p in env['PATH'].split(os.pathsep)
+                        if '_MEI' not in p
+                    )
+                    env['PATH'] = clean_path
+                print(f"[ServerControl] Cleaned PyInstaller env vars for server launch")
+
+            popen_kwargs = dict(
                 cwd=batch_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                env=env,
             )
+            if _IS_WINDOWS:
+                popen_kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+                self.server_process = subprocess.Popen(
+                    self.config.SERVER_BATCH, **popen_kwargs)
+            else:
+                # Linux: launch the shell script in a new session so it doesn't
+                # die when the bot's terminal closes.
+                self.server_process = subprocess.Popen(
+                    ['bash', self.config.SERVER_BATCH],
+                    start_new_session=True, **popen_kwargs)
             self._batch_pid = self.server_process.pid
             print(f"[ServerControl] Started server (PID: {self._batch_pid}, cwd: {batch_dir})")
 
@@ -423,23 +482,36 @@ class PZBot(commands.Bot):
         """Find PID of an already-running server (bot restart scenario)."""
         self._batch_pid = None
         proc = self.config.SERVER_PROCESS_NAME
-        output = _tasklist(f'IMAGENAME eq {proc}')
-        # tasklist CSV format: "image","pid","session","session#","mem"
-        try:
-            output_csv = subprocess.check_output(
-                f'tasklist /FI "IMAGENAME eq {proc}" /FO CSV /NH',
-                shell=True, text=True, timeout=10
-            )
-            for line in output_csv.strip().splitlines():
-                if proc in line:
-                    parts = line.split(',')
-                    if len(parts) >= 2:
-                        pid = int(parts[1].strip('"'))
-                        print(f"[ServerControl] Discovered server PID: {pid}")
-                        self.server_process = type('Process', (), {'pid': pid})()
-                        return
-        except Exception as e:
-            print(f"[ServerControl] Could not discover server PID: {e}")
+
+        if _IS_WINDOWS:
+            try:
+                output_csv = subprocess.check_output(
+                    f'tasklist /FI "IMAGENAME eq {proc}" /FO CSV /NH',
+                    shell=True, text=True, timeout=10
+                )
+                for line in output_csv.strip().splitlines():
+                    if proc in line:
+                        parts = line.split(',')
+                        if len(parts) >= 2:
+                            pid = int(parts[1].strip('"'))
+                            print(f"[ServerControl] Discovered server PID: {pid}")
+                            self.server_process = type('Process', (), {'pid': pid})()
+                            return
+            except Exception as e:
+                print(f"[ServerControl] Could not discover server PID: {e}")
+        else:
+            # Linux: use pgrep to find the process
+            try:
+                output = subprocess.check_output(
+                    ['pgrep', '-f', proc], text=True, timeout=10
+                ).strip()
+                if output:
+                    pid = int(output.splitlines()[0])
+                    print(f"[ServerControl] Discovered server PID: {pid}")
+                    self.server_process = type('Process', (), {'pid': pid})()
+                    return
+            except Exception as e:
+                print(f"[ServerControl] Could not discover server PID: {e}")
 
     async def stop_server(self) -> None:
         self.state.server_ready = False
@@ -448,22 +520,41 @@ class PZBot(commands.Bot):
         await self.rcon.save_and_quit()
 
         proc = self.config.SERVER_PROCESS_NAME
-        _taskkill(f'/im "{proc}"')
 
-        for pid in filter(None, {getattr(self, '_batch_pid', None),
-                                  getattr(self.server_process, 'pid', None)}):
-            _taskkill(f'/t /pid {pid}')
+        if _IS_WINDOWS:
+            _taskkill(f'/im "{proc}"')
+
+            for pid in filter(None, {getattr(self, '_batch_pid', None),
+                                      getattr(self.server_process, 'pid', None)}):
+                _taskkill(f'/t /pid {pid}')
+
+            batch_name = os.path.basename(self.config.SERVER_BATCH)
+            for title in (batch_name, f'Administrator:  {batch_name}', self.config.SERVER_BATCH):
+                _taskkill(f'/fi "WINDOWTITLE eq {title}"')
+        else:
+            # Linux: kill by PID, then by process name as fallback
+            import signal
+            for pid in filter(None, {getattr(self, '_batch_pid', None),
+                                      getattr(self.server_process, 'pid', None)}):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            # Fallback: pkill by process name
+            try:
+                subprocess.run(['pkill', '-f', proc],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
+
         self._batch_pid = None
         self.server_process = None
-
-        batch_name = os.path.basename(self.config.SERVER_BATCH)
-        for title in (batch_name, f'Administrator:  {batch_name}', self.config.SERVER_BATCH):
-            _taskkill(f'/fi "WINDOWTITLE eq {title}"')
 
         await asyncio.sleep(2)
         print("[ServerControl] Stop complete.")
 
     async def restart_server(self) -> None:
+        self.cancel_restart_task()  # Cancel any pending mod update / postponed restart
         self.state.server_ready = False
         self.state.is_restarting = True
         print("[ServerControl] Restarting...")
@@ -520,6 +611,66 @@ class PZBot(commands.Bot):
             self.state.last_rcon_ok = False
         return response
 
+    # ---- Horde Night Restart Guard ----
+
+    def _is_horde_blocking_restart(self, real_minutes_ahead=0) -> tuple:
+        """Check if a horde event should block a server restart.
+        Returns (should_block, reason_string).
+
+        real_minutes_ahead: how many real-world minutes until the restart
+        would actually execute. The method projects the in-game time forward
+        by that amount using the server's DayLength setting (hoursForDay).
+
+        Conversion: 1 in-game day = hoursForDay real hours.
+        So 1 in-game hour = hoursForDay/24 real hours = hoursForDay*2.5 real minutes.
+        Inverse: 1 real minute = 24/(hoursForDay*60) in-game hours.
+
+        Blocks if:
+          - Horde is currently active
+          - Horde is scheduled for today AND the current or projected
+            in-game time falls inside or near the night window (19:00+)
+          - Currently in the post-midnight tail of the window (before 7 AM)
+        """
+        horde = lua_bridge.read_horde_status()
+        world = lua_bridge.read_world_status()
+
+        if not horde:
+            return False, ""
+
+        phase = horde.get("phase", "")
+
+        # Active horde — always block
+        if phase == "active":
+            return True, "Horde night is currently active"
+
+        # Check if horde is scheduled for today and window is imminent
+        if phase == "scheduled" and world:
+            next_day = horde.get("nextHordeDay")
+            if next_day is not None:
+                age_raw = world.get("worldAgeDays", 0)
+                current_day = int(age_raw + 0.5) if age_raw >= 1 else max(1, int(age_raw + 0.5))
+                hour = world.get("hour", 12)
+
+                # Calculate in-game hours that will pass in real_minutes_ahead
+                hours_for_day = world.get("hoursForDay", 2)
+                if hours_for_day <= 0:
+                    hours_for_day = 2
+                # 1 real minute = 24 / (hoursForDay * 60) in-game hours
+                ig_hours_per_real_min = 24.0 / (hours_for_day * 60)
+                lookahead_ig_hours = real_minutes_ahead * ig_hours_per_real_min
+                projected_hour = hour + lookahead_ig_hours
+
+                if next_day == current_day:
+                    if hour >= 19 or projected_hour >= 19:
+                        return True, (f"Horde night tonight (day {next_day}), "
+                                      f"in-game {hour}:00, projected {projected_hour:.0f}:00 "
+                                      f"in {real_minutes_ahead}m")
+                    # Post-midnight tail of tonight's window
+                    if hour < 7:
+                        return True, f"Horde night active (day {next_day}), in-game {hour}:00 (post-midnight)"
+
+        return False, ""
+
     # ---- Mod Restart Logic ----
 
     async def handle_mod_updates(self) -> None:
@@ -536,6 +687,27 @@ class PZBot(commands.Bot):
 
     async def _mod_restart_sequence(self) -> None:
         try:
+            # Check if a horde night would be interrupted.
+            # Mod restart countdown takes ~15 real minutes = ~3 in-game hours.
+            blocked, reason = self._is_horde_blocking_restart(real_minutes_ahead=15)
+            if blocked:
+                print(f"[ModRestart] Deferred: {reason}")
+                await self.send_notification(
+                    f"{Emojis.JEEVES} Mod update restart deferred — {reason}. Will retry after the event.",
+                    discord.Colour.orange()
+                )
+                # Wait and retry every 5 minutes until the horde clears
+                while True:
+                    await asyncio.sleep(300)
+                    blocked, reason = self._is_horde_blocking_restart()
+                    if not blocked:
+                        print("[ModRestart] Horde cleared, proceeding with restart.")
+                        await self.send_notification(
+                            f"{Emojis.JEEVES} Horde event concluded — proceeding with mod update restart.",
+                            discord.Colour.purple()
+                        )
+                        break
+
             await self.send_notification(
                 f"{Emojis.JEEVES} Mod update detected!", discord.Colour.purple(),
                 description=str(self.state.updated_mods)
@@ -811,6 +983,40 @@ async def cmd_unskip(interaction: discord.Interaction) -> None:
         )
 
 
+@bot.tree.command(name="postpone", description="Postpone a mod update restart by 10 minutes.")
+@require_role(config.DEFAULT_ROLE)
+async def cmd_postpone(interaction: discord.Interaction) -> None:
+    if not bot.state.restart_task or bot.state.restart_task.done():
+        await _respond(interaction, f"{Emojis.DIZZY} No mod update restart is currently pending.", discord.Colour.yellow())
+        return
+    # Cancel the active countdown
+    bot.cancel_restart_task()
+    await _respond(
+        interaction,
+        f"{Emojis.JEEVES} Mod update restart postponed by 10 minutes.",
+        discord.Colour.green(), ephemeral=False
+    )
+    await bot.send_notification(
+        f"{Emojis.JEEVES} Mod update restart postponed 10 minutes by {interaction.user.display_name}.",
+        discord.Colour.yellow()
+    )
+    await bot.rcon.broadcast("Mod update restart postponed by 10 minutes.")
+
+    # Re-queue the restart after 10 minutes
+    async def _delayed_restart():
+        try:
+            await asyncio.sleep(600)  # 10 minutes
+            await bot.send_notification(
+                f"{Emojis.JEEVES} Postponed mod update restart starting now.",
+                discord.Colour.purple()
+            )
+            await bot._mod_restart_sequence()
+        except asyncio.CancelledError:
+            print("[Postpone] Delayed restart cancelled.")
+
+    bot.state.restart_task = asyncio.create_task(_delayed_restart())
+
+
 @bot.tree.command(name="mod", description="Checks if the server's mods are up to date.")
 @require_role(config.DEFAULT_ROLE)
 async def cmd_mod(interaction: discord.Interaction) -> None:
@@ -961,13 +1167,26 @@ def enforce_single_instance() -> None:
         except (ValueError, OSError):
             old_pid = None
         if old_pid and old_pid != my_pid:
-            output = _tasklist(f'PID eq {old_pid}')
-            if str(old_pid) in output and "python" in output.lower():
-                print(f"[SingleInstance] Killing previous instance (PID: {old_pid})...")
-                os.system(f'taskkill /f /t /pid {old_pid} 2>nul')
-                time.sleep(2)
+            if _IS_WINDOWS:
+                output = _tasklist(f'PID eq {old_pid}')
+                if str(old_pid) in output and "python" in output.lower():
+                    print(f"[SingleInstance] Killing previous instance (PID: {old_pid})...")
+                    os.system(f'taskkill /f /t /pid {old_pid} 2>nul')
+                    time.sleep(2)
+                else:
+                    print(f"[SingleInstance] Stale lock file (PID {old_pid} gone).")
             else:
-                print(f"[SingleInstance] Stale lock file (PID {old_pid} gone).")
+                # Linux: check if the old PID is still running
+                try:
+                    os.kill(old_pid, 0)  # signal 0 = check existence only
+                    print(f"[SingleInstance] Killing previous instance (PID: {old_pid})...")
+                    import signal
+                    os.kill(old_pid, signal.SIGTERM)
+                    time.sleep(2)
+                except ProcessLookupError:
+                    print(f"[SingleInstance] Stale lock file (PID {old_pid} gone).")
+                except PermissionError:
+                    print(f"[SingleInstance] Cannot kill PID {old_pid} (permission denied).")
     try:
         LOCK_FILE.write_text(str(my_pid))
     except OSError as e:
