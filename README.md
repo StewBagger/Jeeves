@@ -21,12 +21,12 @@ A Discord bot that manages a Project Zomboid dedicated server. Features include 
 
 ## Requirements
 
-- **Windows** — The bot is designed to run on the same Windows machine as your PZ dedicated server.
+- **Windows or Linux** — The bot runs on the same machine as your PZ dedicated server. Both platforms are fully supported.
 - **Project Zomboid Dedicated Server** — Installed via SteamCMD with RCON enabled.
 - **Discord Account** — You need to create a Discord bot application (free).
 - **SteamCMD** *(optional)* — Only required if you want to use the `/update` command to update the server from Discord.
 
-If running from the pre-built `.exe`, no Python installation is needed.
+If running from the pre-built executable, no Python installation is needed.
 If running from source or building yourself, you need **Python 3.10+**.
 
 ---
@@ -83,14 +83,14 @@ You need two Discord IDs for the configuration:
 
 ## Installation
 
-### Option A: Pre-Built Executable (Recommended)
+### Option A: Pre-Built Executable (Windows — Recommended)
 
 1. Extract the `Jeeves` folder to a location on your server machine
 2. Copy `config.env.example` to `config.env`
 3. Edit `config.env` with your settings (see [Configuration](#configuration))
 4. Run `Jeeves.exe`
 
-### Option B: Running from Source
+### Option B: Running from Source (Windows)
 
 1. Install [Python 3.10+](https://www.python.org/downloads/) — check **"Add Python to PATH"** during installation
 2. Open a command prompt in the JeevesBot folder
@@ -104,6 +104,33 @@ You need two Discord IDs for the configuration:
    ```
    python Jeeves.py
    ```
+
+### Option C: Running from Source (Linux — Recommended for Linux)
+
+1. Install Python 3.10+ if not already present:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt install python3 python3-pip
+   # Fedora/RHEL
+   sudo dnf install python3 python3-pip
+   ```
+2. Copy the JeevesBot folder to your server
+3. Install dependencies:
+   ```bash
+   chmod +x install.sh run.sh
+   ./install.sh
+   ```
+4. Copy `config.env.example` to `config.env` and edit with your Linux paths:
+   ```bash
+   cp config.env.example config.env
+   nano config.env
+   ```
+5. Run:
+   ```bash
+   ./run.sh
+   ```
+
+See [Running as a systemd Service](#running-as-a-systemd-service-linux) for production use on Linux.
 
 ---
 
@@ -120,16 +147,16 @@ Edit `config.env` with a text editor (Notepad works fine). Every line that says 
 | `DISCORD_GUILD_ID` | Your Discord server ID |
 | `RCON_PASSWORD` | Must match the RCON password in your PZ server settings |
 | `RCON_PORT` | Must match the RCON port in your PZ server settings (default: 27015) |
-| `SERVER_BATCH` | Full path to your server's `StartServer64.bat` file |
-| `SERVER_INI_PATH` | Full path to your server's `.ini` file (e.g., `C:\Users\You\Zomboid\Server\MyServer.ini`) |
-| `MODS_FOLDER_PATH` | Path to the Workshop content folder (usually `...\steamapps\workshop\content\108600`) |
+| `SERVER_BATCH` | Full path to your server start script (`StartServer64.bat` on Windows, `start-server.sh` on Linux) |
+| `SERVER_INI_PATH` | Full path to your server's `.ini` file (e.g., `C:\Users\You\Zomboid\Server\MyServer.ini` or `/home/pzuser/Zomboid/Server/MyServer.ini`) |
+| `MODS_FOLDER_PATH` | Path to the Workshop content folder (usually `.../steamapps/workshop/content/108600`) |
 
 ### Optional Settings
 
 | Setting | Description |
 |---------|-------------|
 | `UPDATE_LOG_PATH` | Where the bot stores mod update timestamps (default: next to the exe) |
-| `STEAMCMD_PATH` | Path to `steamcmd.exe` — only needed for the `/update` command |
+| `STEAMCMD_PATH` | Path to SteamCMD (`steamcmd.exe` on Windows, `/usr/games/steamcmd` on Linux) — only needed for `/update` |
 | `CHAT_RELAY_CHANNEL_ID` | Discord channel ID for bidirectional chat relay |
 | `CHAT_LOG_PATH` | Path to your PZ server's Logs folder (for chat relay) |
 | `USER_LOG_PATH` | Path to your PZ server's Logs folder (for player tracking) |
@@ -177,13 +204,46 @@ To get an emoji ID: type `\:emojiname:` in Discord chat and send it. Discord wil
 
 ### Running as a Service
 
-For production use, you'll want the bot to start automatically. The simplest approach:
+For production use, you'll want the bot to start automatically.
+
+**Windows:**
 
 1. Create a shortcut to `Jeeves.exe`
 2. Press `Win+R`, type `shell:startup`, press Enter
 3. Move the shortcut into the Startup folder
 
 For more robust options, use [NSSM](https://nssm.cc/) to register it as a Windows service.
+
+**Linux (systemd):**
+<a name="running-as-a-systemd-service-linux"></a>
+
+Create a service file at `/etc/systemd/system/jeevesbot.service`:
+
+```ini
+[Unit]
+Description=JeevesBot — PZ Server Manager
+After=network.target
+
+[Service]
+Type=simple
+User=pzuser
+WorkingDirectory=/home/pzuser/JeevesBot
+ExecStart=/usr/bin/python3 /home/pzuser/JeevesBot/Jeeves.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable jeevesbot
+sudo systemctl start jeevesbot
+sudo systemctl status jeevesbot   # verify it's running
+sudo journalctl -u jeevesbot -f   # tail logs
+```
 
 ---
 
@@ -277,7 +337,9 @@ JeevesBot is one part of the Jeeves server management suite. Each component work
 
 ## Building from Source
 
-If you've made changes to the bot code and want to compile a new `.exe`:
+If you've made changes to the bot code and want to compile a standalone executable:
+
+**Windows:**
 
 1. Make sure Python 3.10+ is installed with pip
 2. Open a command prompt in the JeevesBot folder
@@ -286,9 +348,18 @@ If you've made changes to the bot code and want to compile a new `.exe`:
    build.bat
    ```
 4. The compiled bot will be in `dist\Jeeves\`
-5. Zip the `dist\Jeeves\` folder for distribution
 
-The build script automatically installs dependencies, runs PyInstaller, and copies the config example and README into the distribution folder.
+**Linux:**
+
+1. Make sure Python 3.10+ is installed
+2. Run:
+   ```bash
+   chmod +x build.sh
+   ./build.sh
+   ```
+3. The compiled bot will be in `dist/Jeeves/`
+
+Most Linux server administrators will not need to build — running from source with `./run.sh` is the recommended approach. The build scripts automatically install dependencies, run PyInstaller, and copy the config example into the distribution folder.
 
 ---
 
@@ -311,9 +382,15 @@ Discord can take up to an hour to propagate slash commands after the bot's first
 
 ### Bot can't start/stop the server
 
+**Windows:**
 - `SERVER_BATCH` must point to the exact `.bat` file you use to start your server
 - The bot must run with the same permissions as the server (if the server runs as Administrator, the bot needs to as well)
 - Make sure your batch file includes `@cd /d "%~dp0"` as the first line — this ensures the server runs from the correct directory regardless of how it's launched
+
+**Linux:**
+- `SERVER_BATCH` must point to your `start-server.sh` script (make sure it's executable: `chmod +x start-server.sh`)
+- The bot must run as the same user that owns the server files, or with sufficient permissions to start/kill the server process
+- If using systemd for both the bot and server, make sure they run as the same user
 
 ### Server crashes when started by the bot but works when started manually
 
@@ -325,8 +402,8 @@ MONITOR_RETRIES=30
 ```
 
 If the server still crashes immediately (within seconds of launching), check:
-- That no other `java.exe` process is still running from a previous server instance
-- That no other application is using your server's ports (run `netstat -ano | findstr :16261` in an admin Command Prompt)
+- That no other java process is still running from a previous server instance (`tasklist | findstr java` on Windows, `pgrep -f zomboid` on Linux)
+- That no other application is using your server's ports (`netstat -ano | findstr :16261` on Windows, `ss -tlnp | grep 16261` on Linux)
 - That your antivirus/firewall isn't blocking a Java process spawned by another application
 
 ### Mod updates not detecting
