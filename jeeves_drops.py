@@ -39,12 +39,16 @@ class JeevesDropsCog(commands.Cog):
         self.bot = bot
         self._sent_drops: set[tuple] = set()
         self._last_poller_key = None
+        self._sent_events: set[tuple] = set()
+        self._last_event_poller_key = None
 
     async def cog_load(self):
         self.drops_status_poller.start()
+        self.supply_event_poller.start()
 
     async def cog_unload(self):
         self.drops_status_poller.cancel()
+        self.supply_event_poller.cancel()
 
     def _check_role(self, interaction: discord.Interaction) -> bool:
         role = discord.utils.get(
@@ -265,6 +269,219 @@ class JeevesDropsCog(commands.Cog):
             title="📦 Air Drop Status",
             description=desc,
             colour=discord.Colour.blue()
+        )
+        await interaction.followup.send(embed=embed)
+
+    # ── supply event background poller ──────────────────────────────────
+
+    LOCATION_NAMES = {
+        "March_Ridge": "March Ridge",
+        "Muldraugh": "Muldraugh",
+        "Dixie": "Dixie",
+        "Doe_Valley": "Doe Valley",
+        "Rosewood": "Rosewood",
+        "Riverside": "Riverside",
+        "West_Point": "West Point",
+        "Valley_Station": "Valley Station",
+        "Louis_Ville": "Louisville",
+        "Irvington": "Irvington",
+        "Brandenburg": "Brandenburg",
+        "Ekron": "Ekron",
+    }
+
+    @tasks.loop(seconds=10)
+    async def supply_event_poller(self):
+        try:
+            status = lua_bridge.read_supply_event_status()
+            if not status:
+                return
+
+            phase = status.get("phase")
+            if not phase:
+                return
+
+            ts = status.get("timestamp", 0)
+            event_id = status.get("eventId", "?")
+            poller_key = (phase, event_id, ts)
+            if poller_key == self._last_event_poller_key:
+                return
+            self._last_event_poller_key = poller_key
+
+            channel = self.bot.get_notification_channel()
+            if not channel:
+                return
+
+            if phase == "active":
+                event_key = (event_id, ts)
+                if event_key in self._sent_events:
+                    return
+
+                name_raw = status.get("name", "Unknown")
+                loc_name = self.LOCATION_NAMES.get(name_raw, name_raw)
+                x = status.get("x", "?")
+                y = status.get("y", "?")
+                despawn_hours = status.get("despawnHours", 24)
+                loot_mult = status.get("lootMultiplier", 2)
+                zombie_count = status.get("zombieCount", 200)
+
+                embed = discord.Embed(
+                    title="🚨 SUPPLY DROP EVENT",
+                    description=(
+                        f"A massive supply drop is incoming at **{loc_name}**!\n\n"
+                        f"📍 Location: **{x}, {y}**\n"
+                        f"📦 Crates: **Military**, **Food/Drink**, **Medical**\n"
+                        f"🎁 Loot Boost: **{loot_mult}x**\n"
+                        f"💀 Zombies: **{zombie_count}**\n"
+                        f"⏰ Despawn: **{despawn_hours} hours**\n\n"
+                        f"*Get to the drop zone before it's too late!*"
+                    ),
+                    colour=discord.Colour.red()
+                )
+                await channel.send(embed=embed)
+                self._sent_events.add(event_key)
+                print(f"[JeevesDrops] Supply event notification sent: {loc_name} (id={event_id})")
+
+                if len(self._sent_events) > 30:
+                    sorted_keys = sorted(self._sent_events, key=lambda k: k[1])
+                    self._sent_events = set(sorted_keys[-15:])
+
+            elif phase == "materialized":
+                name_raw = status.get("name", "Unknown")
+                loc_name = self.LOCATION_NAMES.get(name_raw, name_raw)
+                crates_spawned = status.get("cratesSpawned", 0)
+                zombie_count = status.get("zombieCount", 0)
+
+                embed = discord.Embed(
+                    title="📦 Supply Event — Crates Landed!",
+                    description=(
+                        f"**{crates_spawned}** supply crates have landed at **{loc_name}**!\n"
+                        f"💀 **{zombie_count}** zombies guarding the site.\n\n"
+                        f"*The clock is ticking — grab what you can!*"
+                    ),
+                    colour=discord.Colour.dark_red()
+                )
+                await channel.send(embed=embed)
+
+            elif phase == "ended":
+                skipped = status.get("skipped", False)
+                if skipped:
+                    embed = discord.Embed(
+                        title="📦 Supply Event Expired",
+                        description="The supply event expired — no one claimed the crates.",
+                        colour=discord.Colour.greyple()
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="📦 Supply Event Ended",
+                        description="The supply event has concluded. Crates will be cleaned up on next restart.",
+                        colour=discord.Colour.greyple()
+                    )
+                await channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"[JeevesDrops] Supply event poller error: {e}")
+
+    @supply_event_poller.before_loop
+    async def before_supply_event_poller(self):
+        await self.bot.wait_until_ready()
+        try:
+            status = lua_bridge.read_supply_event_status()
+            if status and status.get("phase") == "active":
+                event_id = status.get("eventId", 0)
+                ts = status.get("timestamp", 0)
+                self._sent_events.add((event_id, ts))
+                print(f"[JeevesDrops] Suppressed stale supply event on startup: id={event_id}")
+        except Exception:
+            pass
+
+    # ── /supplyevent ────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="supplyevent",
+        description="Force-trigger a supply drop event at a random map location."
+    )
+    async def cmd_supply_event(self, interaction: discord.Interaction) -> None:
+        if not self._check_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Permission Denied",
+                description=f"You need the **{self.bot.config.DEFAULT_ROLE}** role.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        success = await lua_bridge.supply_event()
+        if success:
+            embed = discord.Embed(
+                title="🚨 Supply Event Triggered!",
+                description=(
+                    f"Triggered by **{interaction.user.display_name}**\n"
+                    f"A supply drop event will fire at the next tick."
+                ),
+                colour=discord.Colour.red()
+            )
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send(embed=discord.Embed(
+                title="Failed to trigger supply event",
+                description="Could not write the command file.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+
+    # ── /supplyeventstatus ──────────────────────────────────────────────
+
+    @app_commands.command(
+        name="supplyeventstatus",
+        description="Show the current supply event status."
+    )
+    async def cmd_supply_event_status(self, interaction: discord.Interaction) -> None:
+        if not self._check_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Permission Denied",
+                description=f"You need the **{self.bot.config.DEFAULT_ROLE}** role.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        success = await lua_bridge.supply_event_status()
+        if not success:
+            await interaction.followup.send(embed=discord.Embed(
+                title="Failed",
+                description="Could not write the command file.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await asyncio.sleep(3)
+
+        status = lua_bridge.read_supply_event_status()
+        if not status or status.get("phase") != "status":
+            await interaction.followup.send(embed=discord.Embed(
+                title="🚨 Supply Event Status",
+                description="No status data available yet.",
+                colour=discord.Colour.greyple()
+            ))
+            return
+
+        has_active = status.get("hasActiveEvent", False)
+        next_hour = status.get("nextEventHour", 0)
+        counter = status.get("eventCounter", 0)
+        materialized = status.get("materialized", False)
+
+        desc = (
+            f"**Active event:** {'Yes' if has_active else 'No'}\n"
+            f"**Materialized:** {'Yes' if materialized else 'No'}\n"
+            f"**Total events:** {counter}\n"
+            f"**Next event hour:** {next_hour}"
+        )
+
+        embed = discord.Embed(
+            title="🚨 Supply Event Status",
+            description=desc,
+            colour=discord.Colour.red() if has_active else discord.Colour.greyple()
         )
         await interaction.followup.send(embed=embed)
 

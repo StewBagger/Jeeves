@@ -235,6 +235,16 @@ async def airdrop_status() -> bool:
     return await write_command("airdropstatus")
 
 
+async def supply_event() -> bool:
+    """Force-trigger a supply drop event."""
+    return await write_command("supplyevent")
+
+
+async def supply_event_status() -> bool:
+    """Request supply event status output."""
+    return await write_command("supplyeventstatus")
+
+
 # =========================================================================
 # Horde status file reader (server -> bot communication)
 # =========================================================================
@@ -357,6 +367,7 @@ def read_drops_status() -> dict | None:
 
 
 WORLD_STATUS_FILE = "jeeves_world_status.lua"
+SUPPLY_EVENT_STATUS_FILE = "jeeves_supply_event_status.lua"
 
 
 def read_world_status() -> dict | None:
@@ -412,3 +423,186 @@ def read_world_status() -> dict | None:
     except Exception as e:
         print(f"[LuaBridge] Failed to read world status: {e}")
         return None
+
+
+def read_supply_event_status() -> dict | None:
+    """Read the supply event status file written by JeevesDropsSupplyEvents.
+    Returns the parsed Lua table as a dict, or None if unavailable.
+    Non-async because it's a simple file read."""
+    if _lua_dir is None:
+        return None
+
+    filepath = _lua_dir / SUPPLY_EVENT_STATUS_FILE
+    if not filepath.exists():
+        return None
+
+    try:
+        text = filepath.read_text(encoding='utf-8').strip()
+        if not text:
+            return None
+
+        inner = text
+        if inner.startswith("return"):
+            inner = inner[6:].strip()
+        if inner.startswith("{"):
+            inner = inner[1:]
+        if inner.endswith("}"):
+            inner = inner[:-1]
+
+        result = {}
+        for line in inner.split('\n'):
+            line = line.strip().rstrip(',')
+            if '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip()
+            val = val.strip()
+
+            if val.startswith('"') and val.endswith('"'):
+                result[key] = val[1:-1]
+            elif val == "true":
+                result[key] = True
+            elif val == "false":
+                result[key] = False
+            else:
+                try:
+                    result[key] = int(val)
+                except ValueError:
+                    try:
+                        result[key] = float(val)
+                    except ValueError:
+                        result[key] = val
+
+        return result if result else None
+
+    except Exception as e:
+        print(f"[LuaBridge] Failed to read supply event status: {e}")
+        return None
+
+
+# =========================================================================
+# Horde survivor data reader (leaderboard)
+# =========================================================================
+
+SURVIVOR_FILE = "jeeves_horde_survivors.lua"
+
+
+def read_survivor_data() -> dict | None:
+    """Read the horde survivor data file written by JeevesHordesServer.
+    Returns a dict of { "username": { "mult": float, "survived": int }, ... }
+    or None if unavailable. Non-async because it's a simple file read."""
+    if _lua_dir is None:
+        return None
+
+    filepath = _lua_dir / SURVIVOR_FILE
+    if not filepath.exists():
+        return None
+
+    try:
+        text = filepath.read_text(encoding='utf-8').strip()
+        if not text:
+            return None
+
+        # Parse: return { ["name"] = { mult = 0.3, survived = 3 }, ... }
+        inner = text
+        if inner.startswith("return"):
+            inner = inner[6:].strip()
+        if inner.startswith("{"):
+            inner = inner[1:]
+        if inner.rstrip().endswith("}"):
+            inner = inner.rstrip()[:-1]
+
+        result = {}
+        import re
+        # Match each player entry: ["name"] = { key = val, key = val, ... },
+        pattern = re.compile(
+            r'\["([^"]+)"\]\s*=\s*\{([^}]*)\}',
+            re.DOTALL
+        )
+        for match in pattern.finditer(inner):
+            username = match.group(1)
+            fields_str = match.group(2)
+            entry = {}
+            for field in fields_str.split(','):
+                field = field.strip()
+                if '=' not in field:
+                    continue
+                k, _, v = field.partition('=')
+                k = k.strip()
+                v = v.strip()
+                if v == "true":
+                    entry[k] = True
+                elif v == "false":
+                    entry[k] = False
+                else:
+                    try:
+                        entry[k] = float(v)
+                    except ValueError:
+                        entry[k] = v
+            result[username] = entry
+
+        return result if result else None
+
+    except Exception as e:
+        print(f"[LuaBridge] Failed to read survivor data: {e}")
+        return None
+
+
+def reset_player_survivor(username: str) -> bool:
+    """Reset a single player's horde survivor data by editing the bridge file.
+    Sets mult=0, survived=0, clears streaks. Works while server is offline.
+    Returns True on success, False on failure."""
+    if _lua_dir is None:
+        return False
+
+    filepath = _lua_dir / SURVIVOR_FILE
+    if not filepath.exists():
+        print(f"[LuaBridge] Survivor file not found: {filepath}")
+        return False
+
+    try:
+        data = read_survivor_data()
+        if not data:
+            print(f"[LuaBridge] No survivor data to reset")
+            return False
+
+        key = username.lower()
+        if key not in data:
+            # Try case-insensitive match
+            for k in data:
+                if k.lower() == key:
+                    key = k
+                    break
+
+        if key not in data:
+            print(f"[LuaBridge] Player '{username}' not found in survivor data")
+            return False
+
+        # Reset the player's entry
+        data[key] = {"mult": 0.0, "survived": 0}
+
+        # Write back the full file
+        lines = ["return {"]
+        for name, entry in data.items():
+            parts = []
+            parts.append(f"mult = {entry.get('mult', 0):.1f}")
+            parts.append(f"survived = {int(entry.get('survived', 0))}")
+            # Preserve other fields if present
+            for field in ('immune', 'immuneDay', 'fragranceBuffDay', 'lastStewDay',
+                          'lastFragranceDay', 'stewStreak', 'fragranceStreak'):
+                val = entry.get(field)
+                if val is not None and val is not False and val != 0:
+                    if isinstance(val, bool):
+                        parts.append(f"{field} = true")
+                    elif isinstance(val, (int, float)):
+                        parts.append(f"{field} = {int(val)}")
+            lines.append(f'  ["{name}"] = {{ {", ".join(parts)} }},')
+        lines.append("}")
+
+        filepath.write_text("\n".join(lines) + "\n", encoding='utf-8')
+        print(f"[LuaBridge] Reset survivor data for '{username}' (key='{key}')")
+        return True
+
+    except Exception as e:
+        print(f"[LuaBridge] Failed to reset player survivor data: {e}")
+        return False

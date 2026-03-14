@@ -403,6 +403,62 @@ class JeevesHordesCog(commands.Cog):
                 colour=discord.Colour.red()
             ), ephemeral=True)
 
+    # ── /playerreset ────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="playerreset",
+        description="Reset a specific player's horde night survivor multiplier and survival count."
+    )
+    @app_commands.describe(
+        username="The player's in-game username (case-insensitive)"
+    )
+    async def cmd_playerreset(self, interaction: discord.Interaction, username: str) -> None:
+        if not self._check_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Permission Denied",
+                description=f"You need the **{self.bot.config.DEFAULT_ROLE}** role to use this command.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        # Read current data first to show what was reset
+        survivor_data = lua_bridge.read_survivor_data()
+        old_mult = 0.0
+        old_survived = 0
+        if survivor_data:
+            key = username.lower()
+            for k, v in survivor_data.items():
+                if k.lower() == key:
+                    old_mult = v.get('mult', 0)
+                    old_survived = int(v.get('survived', 0))
+                    break
+
+        success = lua_bridge.reset_player_survivor(username)
+        if success:
+            await interaction.followup.send(embed=discord.Embed(
+                title="\U0001f504 Player Progress Reset",
+                description=(
+                    f"Reset by **{interaction.user.display_name}**\n\n"
+                    f"**Player:** {username}\n"
+                    f"**Previous multiplier:** {old_mult:.1f}x\n"
+                    f"**Previous survivals:** {old_survived}\n\n"
+                    "Multiplier and survival count set to 0.\n"
+                    "Changes take effect on next server restart or horde event."
+                ),
+                colour=discord.Colour.orange()
+            ))
+        else:
+            await interaction.followup.send(embed=discord.Embed(
+                title="Failed to reset player",
+                description=(
+                    f"Could not find or reset player **{username}**.\n"
+                    "Check that the player name is correct and has participated in at least one horde night."
+                ),
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(JeevesHordesCog(bot))

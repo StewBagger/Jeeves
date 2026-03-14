@@ -55,14 +55,19 @@ class AutoRestartCog(commands.Cog):
                 blocked, reason = self.bot._is_horde_blocking_restart()
                 if not blocked:
                     self._horde_defer_active = False
-                    print("[AutoRestart] Horde cleared, proceeding with restart.")
+                    print("[AutoRestart] Horde cleared, running deferred countdown.")
                     await self.bot.send_notification(
-                        f"{self.bot.Emojis.JEEVES} Horde event concluded — proceeding with scheduled restart.",
+                        f"{self.bot.Emojis.JEEVES} Horde event concluded — server will restart in 5 minutes.",
                         discord.Colour.yellow()
                     )
                     await self.bot.rcon.broadcast(
-                        "Horde event concluded. Server restarting now."
+                        "Horde event concluded. Server will restart in 5 minutes!"
                     )
+                    await asyncio.sleep(240)  # 4 minutes
+                    await self._announce("1 Minute", self.bot.Emojis.SPIFFO_KATANA)
+                    await asyncio.sleep(50)   # 50 seconds
+                    await self._announce("10 Seconds", self.bot.Emojis.SPIFFO_STOP)
+                    await asyncio.sleep(10)
                     break
 
         import discord

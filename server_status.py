@@ -10,8 +10,13 @@ Maintains a single auto-updating Discord embed in a dedicated channel showing:
   - Weather conditions, wind, and temperature
   - Next horde night (days remaining)
 
-Uses Discord embed text fields for crisp, natively-rendered data with the
-Jeeves bunker artwork as branding imagery.
+Resilience features:
+  - Grace period: 3 consecutive RCON failures before showing offline
+  - Lua file freshness: treats recently-written bridge files as a secondary
+    online signal even if RCON is momentarily unresponsive
+  - Last-known-good data: retains and displays cached world/horde data during
+    brief outages instead of blanking the panel
+  - Horde status: shows event count and current day alongside next horde info
 
 Config:
   STATUS_CHANNEL_ID=  (Discord channel ID for the status embed)
@@ -19,6 +24,7 @@ Config:
 
 import os
 import sys
+import time
 import datetime
 import discord
 from discord.ext import commands, tasks
@@ -49,6 +55,13 @@ WEATHER_EMOJI = {
     "Foggy": "\U0001f32b\ufe0f",
     "Snowing": "\u2744\ufe0f",
 }
+
+# How many consecutive RCON failures before declaring offline
+OFFLINE_GRACE_COUNT = 3
+
+# How old (seconds) a Lua bridge file can be and still count as "fresh"
+# (i.e., the server was writing data recently even if RCON timed out)
+BRIDGE_FRESHNESS_SECONDS = 120
 
 # ============================================================================
 # Data helpers
@@ -86,15 +99,41 @@ def _temp_f(celsius):
     return f"{celsius * 9 / 5 + 32:.0f}\u00b0F"
 
 
+def _bridge_file_is_fresh(data, max_age=BRIDGE_FRESHNESS_SECONDS):
+    """Check if a Lua bridge dict has a recent timestamp."""
+    if not data:
+        return False
+    ts = data.get("timestamp")
+    if ts is None:
+        return False
+    try:
+        age = time.time() - float(ts)
+        return age < max_age
+    except (TypeError, ValueError):
+        return False
+
+
 # ============================================================================
 # Embed builder
 # ============================================================================
 
-def build_embed(server_online, world, horde, skip_active):
-    """Build the status dashboard embed."""
+def build_embed(server_online, world, horde, skip_active, stale=False):
+    """Build the status dashboard embed.
 
-    if server_online:
+    Args:
+        server_online: Whether the server is confirmed online.
+        world: World data dict (may be cached/stale).
+        horde: Horde data dict (may be cached/stale).
+        skip_active: Whether next restart is being skipped.
+        stale: If True, data is cached from a previous poll (server may be
+               temporarily unreachable but we're within the grace period).
+    """
+
+    if server_online and not stale:
         embed = discord.Embed(colour=discord.Colour.green())
+    elif server_online and stale:
+        # Within grace period — show amber/yellow to hint at instability
+        embed = discord.Embed(colour=discord.Colour.orange())
     else:
         embed = discord.Embed(colour=discord.Colour.red())
 
@@ -102,14 +141,18 @@ def build_embed(server_online, world, horde, skip_active):
     embed.set_thumbnail(url=ICON_URL)
     embed.set_image(url=IMAGE_URL)
 
-    if not server_online:
+    # Fully offline with no cached data at all
+    if not server_online and not world:
         embed.add_field(name="\u200b", value="\U0001f534 **Server Offline**", inline=False)
         embed.set_footer(text="Updates every 30 seconds")
         embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
         return embed
 
     # --- Row 1: Status | Players | Restart ---
-    embed.add_field(name="\U0001f4e1 Status", value="\U0001f7e2 Online", inline=True)
+    if server_online:
+        embed.add_field(name="\U0001f4e1 Status", value="\U0001f7e2 Online", inline=True)
+    else:
+        embed.add_field(name="\U0001f4e1 Status", value="\U0001f534 Offline", inline=True)
 
     player_count = "0"
     if world and world.get("playerCount") is not None:
@@ -134,22 +177,33 @@ def build_embed(server_online, world, horde, skip_active):
 
         age_raw = world.get("worldAgeDays", 0)
         elapsed = world.get("elapsedDays", 0)
-        if age_raw >= 1:
-            age = int(age_raw + 0.5)
-        elif elapsed and elapsed > 0:
+        if elapsed and elapsed > 0:
             age = int(elapsed)
+        elif age_raw >= 1:
+            age = int(age_raw)
         else:
-            age = max(1, int(age_raw + 0.5))
+            age = max(1, int(age_raw))
         embed.add_field(name="\U0001f4c6 Age", value=f"Day {age}", inline=True)
     else:
         embed.add_field(name="\U0001f30d World", value="Waiting...", inline=False)
 
-    # --- Row 3: Weather | Cycle | Horde ---
+    # --- Row 3: Weather | Wind | Cycle ---
     if world:
         weather = world.get("weather", "Clear")
         temp = world.get("temperature", 0)
         w_emoji = WEATHER_EMOJI.get(weather, "\u2600\ufe0f")
         embed.add_field(name=f"{w_emoji} Weather", value=f"{weather}, {_temp_f(temp)}", inline=True)
+
+        wind_speed = world.get("windSpeed", 0)
+        if wind_speed > 0.6:
+            wind_desc = "Strong"
+        elif wind_speed > 0.3:
+            wind_desc = "Moderate"
+        elif wind_speed > 0.05:
+            wind_desc = "Light"
+        else:
+            wind_desc = "Calm"
+        embed.add_field(name="\U0001f4a8 Wind", value=wind_desc, inline=True)
 
         is_night = world.get("isNight", False)
         if is_night:
@@ -159,50 +213,56 @@ def build_embed(server_online, world, horde, skip_active):
     else:
         embed.add_field(name="\u2601\ufe0f Weather", value="Waiting...", inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
 
-    # Horde (completes row 3)
-    horde_val = _horde_value(horde, world)
-    embed.add_field(name="\U0001f9df Horde", value=horde_val, inline=True)
+    # --- Row 4: Horde Day | Horde Status | Completed ---
+    horde_day, horde_status, horde_completed = _horde_fields(horde)
+    embed.add_field(name="\U0001f31a Horde", value=horde_day, inline=True)
+    embed.add_field(name="\U0001f9df Status", value=horde_status, inline=True)
+    embed.add_field(name="\U0001f3c6 Completed", value=horde_completed, inline=True)
 
-    embed.set_footer(text="Updates every 30 seconds")
+    footer = "Updates every 30 seconds"
+    if stale:
+        footer = "Updates every 30 seconds \u2022 Data may be stale"
+    embed.set_footer(text=footer)
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
     return embed
 
 
-def _horde_value(horde, world):
-    """Determine horde display value from status file and world data."""
+def _horde_fields(horde):
+    """Return (horde_day, horde_status, completed) for three inline fields."""
     if not horde:
-        return "Waiting..."
+        return ("—", "Idle", "0")
 
     phase = horde.get("phase", "")
-
-    # Active horde
-    if phase == "active":
-        return "\u26a0\ufe0f **ACTIVE**"
-
-    # Try nextHordeDay first, then eventDay
+    event_count = horde.get("eventCount")
     next_day = horde.get("nextHordeDay")
-    if next_day is None:
-        next_day = horde.get("eventDay")
 
-    if next_day is not None and world:
-        # Use JE_GetActualDay equivalent — the horde mod uses its own day
-        # counter, so compare directly against the value it wrote.
-        # The horde mod writes nextHordeDay relative to its own day system,
-        # so we just display the raw value from the file.
-        if phase == "ended":
-            return "Completed"
-        if phase == "scheduled":
-            return f"Day {next_day}"
+    # Horde day — the Lua scheduler's day counter runs 1 ahead of what
+    # players see in-game. Subtract 1 to match the in-game display.
+    if next_day is not None:
+        horde_day = f"Day {next_day - 1}"
+    else:
+        horde_day = "—"
 
-    # Fallback for other phases
-    if phase == "ended":
-        return "Completed"
-    if phase == "scheduled":
-        return "Scheduled"
-    if phase:
-        return phase.capitalize()
-    return "Scheduled"
+    # Status
+    if phase == "active":
+        horde_status = "\u26a0\ufe0f **ACTIVE**"
+    elif phase == "ended":
+        horde_status = "Idle"
+    elif phase == "scheduled":
+        horde_status = "Scheduled"
+    elif phase == "status":
+        horde_status = "Idle"
+    elif phase:
+        horde_status = phase.capitalize()
+    else:
+        horde_status = "Idle"
+
+    # Completed count
+    horde_completed = str(event_count) if event_count is not None else "0"
+
+    return (horde_day, horde_status, horde_completed)
 
 
 # ============================================================================
@@ -216,6 +276,13 @@ class ServerStatusCog(commands.Cog):
         self._channel_id = int(os.getenv('STATUS_CHANNEL_ID', '0'))
         self._message_id = None
         self._channel = None
+
+        # Grace period state
+        self._rcon_fail_count = 0
+
+        # Last known good data (retained across brief outages)
+        self._last_world = None
+        self._last_horde = None
 
         if not self._channel_id:
             print("[ServerStatus] WARNING: STATUS_CHANNEL_ID not set. Dashboard disabled.")
@@ -279,12 +346,52 @@ class ServerStatusCog(commands.Cog):
     @tasks.loop(seconds=30)
     async def status_loop(self):
         try:
-            server_online = self.bot.state.server_ready and self.bot.rcon.is_server_online()
+            # --- 1. Probe RCON ---
+            rcon_ok = self.bot.state.server_ready and self.bot.rcon.is_server_online()
+
+            # --- 2. Read Lua bridge files ---
             world = lua_bridge.read_world_status()
             horde = lua_bridge.read_horde_status()
-            skip_active = self.bot.state.skip_next_restart
 
-            embed = build_embed(server_online, world, horde, skip_active)
+            # --- 3. Determine online status with grace period ---
+            world_fresh = _bridge_file_is_fresh(world)
+            horde_fresh = _bridge_file_is_fresh(horde)
+            bridge_fresh = world_fresh or horde_fresh
+
+            if rcon_ok:
+                # RCON succeeded — reset fail counter, update cache
+                self._rcon_fail_count = 0
+                if world:
+                    self._last_world = world
+                if horde:
+                    self._last_horde = horde
+
+                embed = build_embed(True, world or self._last_world,
+                                    horde or self._last_horde,
+                                    self.bot.state.skip_next_restart, stale=False)
+            elif bridge_fresh:
+                # RCON failed but bridge files are fresh — server is likely busy
+                self._rcon_fail_count += 1
+                if world:
+                    self._last_world = world
+                if horde:
+                    self._last_horde = horde
+
+                embed = build_embed(True, world or self._last_world,
+                                    horde or self._last_horde,
+                                    self.bot.state.skip_next_restart, stale=True)
+            elif self._rcon_fail_count < OFFLINE_GRACE_COUNT:
+                # RCON failed, bridge stale, but still within grace period
+                self._rcon_fail_count += 1
+
+                embed = build_embed(True, self._last_world, self._last_horde,
+                                    self.bot.state.skip_next_restart, stale=True)
+            else:
+                # Fully offline: RCON failed repeatedly, bridge stale
+                # Still show last known data rather than blanking
+                embed = build_embed(False, self._last_world, self._last_horde,
+                                    self.bot.state.skip_next_restart, stale=False)
+
             await self._send_or_edit(embed)
 
         except Exception as e:

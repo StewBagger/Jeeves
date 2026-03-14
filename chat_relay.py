@@ -34,7 +34,7 @@ SIZE_TAG_RE = re.compile(r'<SIZE:[^>]+>')
 # Parse player chat lines from the PZ server chat log
 # Format: [timestamp][info] Got message:ChatMessage{chat=General, author='StewBag', text='hello'}.
 CHAT_LINE_RE = re.compile(
-    r'\[.*?\]\[info\] Got message:ChatMessage\{chat=(\w+), author=\'([^\']+)\', text=\'([^\']*)\'\}'
+    r"\[.*?\]\[info\] Got message:ChatMessage\{chat=(\w+), author='([^']+)', text='(.*)'\}\."
 )
 
 

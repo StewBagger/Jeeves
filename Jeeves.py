@@ -168,9 +168,15 @@ class RCONHelper:
         self.port = config.RCON_PORT
         self.password = config.RCON_PASSWORD
 
-    async def send_command(self, command: str) -> Optional[str]:
+    async def send_command(self, command: str, timeout: int = 10) -> Optional[str]:
         try:
-            return await rcon.source.rcon(command, host=self.host, port=self.port, passwd=self.password)
+            return await asyncio.wait_for(
+                rcon.source.rcon(command, host=self.host, port=self.port, passwd=self.password),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            print(f"RCON timeout ({timeout}s): {command}")
+            return None
         except (socket.timeout, ConnectionRefusedError, OSError) as e:
             print(f"RCON error: {e}")
             return None
@@ -251,7 +257,7 @@ class ModChecker:
         for i, item_id in enumerate(workshop_ids):
             data[f'publishedfileids[{i}]'] = item_id
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(self.config.STEAM_API_URL, data=data)
                 resp.raise_for_status()
@@ -387,7 +393,7 @@ class PZBot(commands.Bot):
         # Initialize the Lua file bridge (must happen before extensions load)
         lua_bridge.init(self)
 
-        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update', 'server_status'):
+        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update', 'server_status', 'horde_leaderboard'):
             try:
                 await self.load_extension(ext)
                 print(f"Loaded {ext}")
@@ -554,7 +560,14 @@ class PZBot(commands.Bot):
         print("[ServerControl] Stop complete.")
 
     async def restart_server(self) -> None:
-        self.cancel_restart_task()  # Cancel any pending mod update / postponed restart
+        if self.state.is_restarting:
+            print("[ServerControl] Restart already in progress, ignoring duplicate request.")
+            return
+        # Cancel any pending mod update countdown, but only if WE are not
+        # inside that task. Otherwise we'd cancel ourselves mid-restart.
+        current_task = asyncio.current_task()
+        if self.state.restart_task and self.state.restart_task is not current_task:
+            self.cancel_restart_task()
         self.state.server_ready = False
         self.state.is_restarting = True
         print("[ServerControl] Restarting...")
@@ -630,6 +643,11 @@ class PZBot(commands.Bot):
           - Horde is scheduled for today AND the current or projected
             in-game time falls inside or near the night window (19:00+)
           - Currently in the post-midnight tail of the window (before 7 AM)
+
+        Day offset: The Lua horde scheduler's nextHordeDay runs 1 ahead of
+        what the world status bridge reports as elapsedDays. The status page
+        subtracts 1 from nextHordeDay for display; this function must apply
+        the same offset when comparing against the current day.
         """
         horde = lua_bridge.read_horde_status()
         world = lua_bridge.read_world_status()
@@ -647,8 +665,15 @@ class PZBot(commands.Bot):
         if phase == "scheduled" and world:
             next_day = horde.get("nextHordeDay")
             if next_day is not None:
-                age_raw = world.get("worldAgeDays", 0)
-                current_day = int(age_raw + 0.5) if age_raw >= 1 else max(1, int(age_raw + 0.5))
+                # Use elapsedDays (accurate date-based count from bridge)
+                # with fallback to worldAgeDays. Match the status page logic.
+                elapsed = world.get("elapsedDays")
+                if elapsed is not None:
+                    current_day = int(elapsed)
+                else:
+                    age_raw = world.get("worldAgeDays", 0)
+                    current_day = int(age_raw) if age_raw >= 1 else max(1, int(age_raw))
+
                 hour = world.get("hour", 12)
 
                 # Calculate in-game hours that will pass in real_minutes_ahead
@@ -660,14 +685,19 @@ class PZBot(commands.Bot):
                 lookahead_ig_hours = real_minutes_ahead * ig_hours_per_real_min
                 projected_hour = hour + lookahead_ig_hours
 
-                if next_day == current_day:
+                # nextHordeDay is 1 ahead of the in-game display day.
+                # Subtract 1 to align with current_day (same offset as
+                # server_status._horde_fields).
+                display_horde_day = next_day - 1
+
+                if display_horde_day == current_day:
                     if hour >= 19 or projected_hour >= 19:
-                        return True, (f"Horde night tonight (day {next_day}), "
+                        return True, (f"Horde night tonight (day {display_horde_day}), "
                                       f"in-game {hour}:00, projected {projected_hour:.0f}:00 "
                                       f"in {real_minutes_ahead}m")
                     # Post-midnight tail of tonight's window
                     if hour < 7:
-                        return True, f"Horde night active (day {next_day}), in-game {hour}:00 (post-midnight)"
+                        return True, f"Horde night active (day {display_horde_day}), in-game {hour}:00 (post-midnight)"
 
         return False, ""
 
@@ -735,19 +765,22 @@ class PZBot(commands.Bot):
 
         for label, emoji, checks in stages:
             await self._announce_restart(label, emoji, reason)
-            for _ in range(checks):
+            for check_num in range(checks):
                 await asyncio.sleep(10)
                 await self.poll_players()
                 if not self.state.players_online:
                     consecutive_empty += 1
                     if consecutive_empty >= EMPTY_CHECKS_REQUIRED:
+                        print(f"[RestartCountdown] No players ({consecutive_empty}x), restarting immediately")
                         await self._immediate_restart()
                         return
                 else:
                     consecutive_empty = 0
+            print(f"[RestartCountdown] Stage '{label}' complete ({checks} checks)")
 
         await self._announce_restart("10 Seconds", Emojis.SPIFFO_STOP, reason)
         await asyncio.sleep(10)
+        print("[RestartCountdown] Final countdown complete, restarting now")
         await self.restart_server()
 
     async def _announce_restart(self, label: str, emoji: str, reason: str = None) -> None:
