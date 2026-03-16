@@ -258,7 +258,7 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 | `/online` | Check if the server is running |
 | `/start` | Start the server if it's offline |
 | `/stop` | Shut down the server |
-| `/restart` | Restart the server with countdown warnings |
+| `/restart` | Restart the server immediately. Use `/restart minutes:10` for a countdown |
 | `/skip` | Skip the next scheduled automatic restart |
 | `/unskip` | Cancel a previously issued skip |
 | `/update` | Update the server via SteamCMD (requires STEAMCMD_PATH) |
@@ -277,7 +277,7 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 
 | Command | Description |
 |---------|-------------|
-| `/mod` | Manually check for mod updates |
+| `/mod` | Check for mod updates. Triggers a restart countdown if updates are found, otherwise confirms all mods are current |
 | `/cleanmods` | Remove unused Workshop mod folders from disk |
 
 ### Rank System
@@ -291,6 +291,26 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 | `/syncranks` | Rebuild all ranks from Discord roles | Admin |
 | `/linkname` | Link another user's Discord to their PZ name | Admin |
 | `/unlinkname` | Remove another user's link | Admin |
+
+### Horde Events
+
+| Command | Description |
+|---------|-------------|
+| `/horde count` | Spawn a manual horde with the specified zombie count |
+| `/hordeoff` | Stop an active horde and cancel any pending schedule |
+| `/hordestatus` | Show current horde state, next scheduled day, and survivor stats |
+| `/hordenight` | Force a horde night tonight with the normal 22:00 schedule |
+| `/hordereset` | Reset all horde progression — event count and all player data |
+| `/hordeclear` | Clear player horde data (buffs, immunity, streaks). Optional `username` for single player |
+| `/hordechange day` | Change the next scheduled horde to a specific world day |
+| `/leaderboard` | Show the horde survivor leaderboard |
+
+### Airdrop Events
+
+| Command | Description |
+|---------|-------------|
+| `/airdrop` | Trigger an airdrop. Optional `target` player and `type` (military, medical, etc.) |
+| `/supply` | Force-trigger a supply drop event |
 
 ---
 

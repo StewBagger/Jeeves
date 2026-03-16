@@ -1,7 +1,7 @@
 """
 jeeves_events.py — Discord bot cog for Jeeves Events mod integration.
 
-Provides /horde, /hordeoff, /hordestatus, /hordenight, and /hordereset slash commands
+Provides /horde, /hordeoff, /hordestatus, /hordenight, /hordereset, /hordeclear, and /hordechange slash commands
 that write commands via the unified lua_bridge module, which the JeevesHordes
 server mod reads.
 
@@ -117,7 +117,7 @@ class JeevesHordesCog(commands.Cog):
                 next_day = status.get("nextHordeDay")
                 desc = "The horde has been defeated. The night is quiet once more."
                 if next_day:
-                    desc += f"\n\nNext horde night: **Day {next_day}**"
+                    desc += f"\n\nNext horde night: **Day {next_day - 1}**"
                 embed = discord.Embed(
                     title="\u2705 Horde Night Has Ended",
                     description=desc,
@@ -312,7 +312,7 @@ class JeevesHordesCog(commands.Cog):
             state,
             "",
             f"\U0001f4c5 Current Day: **{day}**",
-            f"\U0001f319 Next Horde Night: **Day {next_day}**" if next_day else "\U0001f319 Next Horde Night: **Not scheduled**",
+            f"\U0001f319 Next Horde Night: **Day {next_day - 1}**" if next_day else "\U0001f319 Next Horde Night: **Not scheduled**",
             f"\U0001f4ca Hordes Completed: **{event_count}**",
         ]
 
@@ -399,6 +399,107 @@ class JeevesHordesCog(commands.Cog):
         else:
             await interaction.followup.send(embed=discord.Embed(
                 title="Failed to reset horde progress",
+                description="Could not write the command file. Check lua_bridge initialization.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+
+    # ── /hordeclear ─────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="hordeclear",
+        description="Clear player horde data — buffs, immunity, cooldowns, streaks, progression."
+    )
+    @app_commands.describe(
+        username="Target a specific player (leave blank to clear ALL players)"
+    )
+    async def cmd_hordeclear(self, interaction: discord.Interaction, username: str = None) -> None:
+        if not self._check_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Permission Denied",
+                description=f"You need the **{self.bot.config.DEFAULT_ROLE}** role to use this command.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        success = await lua_bridge.horde_clear(username)
+        if success:
+            if username:
+                await interaction.followup.send(embed=discord.Embed(
+                    title="\U0001f9f9 Player Horde Data Cleared",
+                    description=(
+                        f"Cleared by **{interaction.user.display_name}**\n\n"
+                        f"Wiped all horde data for **{username}**:\n"
+                        "\u2022 Survivor multiplier & survival count\n"
+                        "\u2022 Zombie Stew immunity & cooldown\n"
+                        "\u2022 Fragrance buff & cooldown\n"
+                        "\u2022 Personal horde & streaks"
+                    ),
+                    colour=discord.Colour.orange()
+                ))
+            else:
+                await interaction.followup.send(embed=discord.Embed(
+                    title="\U0001f9f9 All Player Horde Data Cleared",
+                    description=(
+                        f"Cleared by **{interaction.user.display_name}**\n\n"
+                        "All player data wiped:\n"
+                        "\u2022 Survivor multipliers & survival counts\n"
+                        "\u2022 Zombie Stew immunity & cooldowns\n"
+                        "\u2022 Fragrance buffs & cooldowns\n"
+                        "\u2022 Personal hordes & streaks\n\n"
+                        "Event count and horde scheduling are unchanged."
+                    ),
+                    colour=discord.Colour.orange()
+                ))
+        else:
+            await interaction.followup.send(embed=discord.Embed(
+                title="Failed to clear player data",
+                description="Could not write the command file. Check lua_bridge initialization.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+
+    # ── /hordechange ───────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="hordechange",
+        description="Change the next scheduled horde to a specific world day."
+    )
+    @app_commands.describe(
+        day="The world day number to schedule the next horde on"
+    )
+    async def cmd_hordechange(self, interaction: discord.Interaction, day: int) -> None:
+        if not self._check_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Permission Denied",
+                description=f"You need the **{self.bot.config.DEFAULT_ROLE}** role to use this command.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        if day < 1:
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Invalid Day",
+                description="Day must be 1 or greater.",
+                colour=discord.Colour.red()
+            ), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        success = await lua_bridge.horde_change(day + 1)
+        if success:
+            await interaction.followup.send(embed=discord.Embed(
+                title="\U0001f4c5 Horde Day Changed",
+                description=(
+                    f"Changed by **{interaction.user.display_name}**\n\n"
+                    f"Next horde night rescheduled to **day {day}**."
+                ),
+                colour=discord.Colour.blue()
+            ))
+        else:
+            await interaction.followup.send(embed=discord.Embed(
+                title="Failed to change horde day",
                 description="Could not write the command file. Check lua_bridge initialization.",
                 colour=discord.Colour.red()
             ), ephemeral=True)

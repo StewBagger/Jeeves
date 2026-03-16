@@ -220,6 +220,20 @@ async def horde_reset() -> bool:
     return await write_command("hordereset")
 
 
+async def horde_clear(username: str = None) -> bool:
+    """Clear all player horde data — buffs, immunity, cooldowns, progression.
+    If username is provided, only clears that player's data."""
+    kwargs = {}
+    if username:
+        kwargs['targetPlayer'] = username
+    return await write_command("hordeclear", **kwargs)
+
+
+async def horde_change(day: int) -> bool:
+    """Change the next scheduled horde to a specific world day."""
+    return await write_command("hordechange", targetDay=day)
+
+
 async def airdrop(target_player: str = None, crate_type: str = None) -> bool:
     """Trigger an air drop event on a random or specific player."""
     kwargs = {}

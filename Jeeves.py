@@ -944,11 +944,47 @@ async def cmd_online(interaction: discord.Interaction) -> None:
         await bot.send_notification(f"{Emojis.PANIC} Server is Offline!", discord.Colour.red())
 
 
-@bot.tree.command(name="restart", description="Restarts the game server.")
+@bot.tree.command(name="restart", description="Restarts the game server. Optional countdown in minutes.")
 @require_role(config.DEFAULT_ROLE)
-async def cmd_restart(interaction: discord.Interaction) -> None:
-    await _respond(interaction, "Restarting server, this may take several minutes...", ephemeral=False)
-    await bot.restart_server()
+@app_commands.describe(
+    minutes="Countdown before restart (e.g. 10, 5, 1). Omit for immediate restart."
+)
+async def cmd_restart(interaction: discord.Interaction, minutes: int = None) -> None:
+    if minutes is not None and minutes > 0:
+        await interaction.response.defer()
+        await interaction.followup.send(embed=discord.Embed(
+            title=f"{Emojis.JEEVES} Restart scheduled",
+            description=f"Server will restart in **{minutes} minute(s)**.",
+            colour=discord.Colour.yellow()
+        ))
+
+        # Build countdown stages from the requested minutes
+        stages = []
+        remaining = minutes
+        if remaining >= 10:
+            stages.append(("10 Minutes", Emojis.SPIFFO_WAVE, (remaining - 5) * 60))
+            remaining = 5
+        if remaining >= 5:
+            stages.append(("5 Minutes", Emojis.SPIFFO_EDUCATE, (remaining - 1) * 60))
+            remaining = 1
+        if remaining >= 1:
+            stages.append(("1 Minute", Emojis.SPIFFO_KATANA, 50))
+            remaining = 0
+
+        for label, emoji, wait_seconds in stages:
+            msg = f"Server will restart in {label}!"
+            await bot.send_notification(f"{emoji} {msg}", discord.Colour.yellow())
+            await bot.rcon.broadcast(msg)
+            await asyncio.sleep(wait_seconds)
+
+        msg = "Server restarting in 10 Seconds!"
+        await bot.send_notification(f"{Emojis.SPIFFO_STOP} {msg}", discord.Colour.yellow())
+        await bot.rcon.broadcast(msg)
+        await asyncio.sleep(10)
+        await bot.restart_server()
+    else:
+        await _respond(interaction, "Restarting server, this may take several minutes...", ephemeral=False)
+        await bot.restart_server()
 
 
 @bot.tree.command(name="start", description="Starts the game server if not running.")
@@ -1053,8 +1089,22 @@ async def cmd_postpone(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="mod", description="Checks if the server's mods are up to date.")
 @require_role(config.DEFAULT_ROLE)
 async def cmd_mod(interaction: discord.Interaction) -> None:
-    await _respond(interaction, "Checking mods...")
-    await bot.handle_mod_updates()
+    await interaction.response.defer()
+    updated = await bot.mod_checker.check_for_updates()
+    if not updated:
+        await interaction.followup.send(embed=discord.Embed(
+            title=f"{Emojis.HAPPY} All mods are up to date!",
+            description="No updates found.",
+            colour=discord.Colour.green()
+        ))
+        return
+    bot.state.updated_mods = updated
+    bot.state.restart_task = asyncio.create_task(bot._mod_restart_sequence())
+    await interaction.followup.send(embed=discord.Embed(
+        title=f"{Emojis.JEEVES} Mod update detected!",
+        description=str(updated),
+        colour=discord.Colour.purple()
+    ))
 
 
 @bot.tree.command(name="playerlist", description="Shows all players who have joined the server.")

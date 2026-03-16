@@ -146,7 +146,9 @@ def _build_leaderboard_embed(survivor_data: dict | None, horde_data: dict | None
         if event_count:
             stats_text += f"\n🌙 **{event_count}** horde nights completed"
         if next_day:
-            stats_text += f" • Next horde: **Day {next_day}**"
+            # nextHordeDay runs 1 ahead of the in-game display day
+            # (same offset as server_status._horde_fields)
+            stats_text += f" • Next horde: **Day {next_day - 1}**"
 
     embed.add_field(name="📊 Stats", value=stats_text, inline=False)
 
