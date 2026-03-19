@@ -393,7 +393,7 @@ class PZBot(commands.Bot):
         # Initialize the Lua file bridge (must happen before extensions load)
         lua_bridge.init(self)
 
-        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'jeeves_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update', 'server_status', 'horde_leaderboard'):
+        for ext in ('auto_restart', 'mod_check_timer', 'player_tracker', 'rank_sync', 'chat_relay', 'horde_events', 'jeeves_drops', 'jeeves_modsorter', 'jeeves_modmanager', 'server_update', 'server_status', 'horde_leaderboard'):
             try:
                 await self.load_extension(ext)
                 print(f"Loaded {ext}")
@@ -713,9 +713,9 @@ class PZBot(commands.Bot):
             print("Auto restart pending, skipping mod restart.")
             self.state.auto_restart_pending = False
             return
-        self.state.restart_task = asyncio.create_task(self._mod_restart_sequence())
+        self.state.restart_task = asyncio.create_task(self._mod_restart_sequence(notify=True))
 
-    async def _mod_restart_sequence(self) -> None:
+    async def _mod_restart_sequence(self, notify: bool = True) -> None:
         try:
             # Check if a horde night would be interrupted.
             # Mod restart countdown takes ~15 real minutes = ~3 in-game hours.
@@ -726,8 +726,11 @@ class PZBot(commands.Bot):
                     f"{Emojis.JEEVES} Mod update restart deferred — {reason}. Will retry after the event.",
                     discord.Colour.orange()
                 )
-                # Wait and retry every 5 minutes until the horde clears
-                while True:
+                # Wait and retry every 5 minutes until the horde clears.
+                # Safety limit: give up after 2 hours to prevent infinite loops
+                # if the horde status file is stale.
+                MAX_HORDE_WAIT = 24  # 24 × 5 min = 2 hours
+                for _ in range(MAX_HORDE_WAIT):
                     await asyncio.sleep(300)
                     blocked, reason = self._is_horde_blocking_restart()
                     if not blocked:
@@ -737,11 +740,18 @@ class PZBot(commands.Bot):
                             discord.Colour.purple()
                         )
                         break
+                else:
+                    print("[ModRestart] Horde wait exceeded 2 hours — proceeding anyway.")
+                    await self.send_notification(
+                        f"{Emojis.JEEVES} Horde wait exceeded 2 hours — proceeding with mod update restart.",
+                        discord.Colour.orange()
+                    )
 
-            await self.send_notification(
-                f"{Emojis.JEEVES} Mod update detected!", discord.Colour.purple(),
-                description=str(self.state.updated_mods)
-            )
+            if notify:
+                await self.send_notification(
+                    f"{Emojis.JEEVES} Mod update detected!", discord.Colour.purple(),
+                    description=str(self.state.updated_mods)
+                )
             await self.rcon.broadcast(
                 "Mod update detected! Server will restart to apply changes. Disconnect now to skip the wait."
             )
@@ -768,6 +778,11 @@ class PZBot(commands.Bot):
             for check_num in range(checks):
                 await asyncio.sleep(10)
                 await self.poll_players()
+                rcon_ok = "ok" if self.state.last_rcon_ok else "FAIL"
+                players = self.state.player_count if self.state.players_online else 0
+                if (check_num + 1) % 5 == 0 or not self.state.last_rcon_ok:
+                    print(f"[RestartCountdown] {label} — check {check_num + 1}/{checks} "
+                          f"rcon={rcon_ok} players={players}")
                 if not self.state.players_online:
                     consecutive_empty += 1
                     if consecutive_empty >= EMPTY_CHECKS_REQUIRED:
@@ -1099,7 +1114,7 @@ async def cmd_mod(interaction: discord.Interaction) -> None:
         ))
         return
     bot.state.updated_mods = updated
-    bot.state.restart_task = asyncio.create_task(bot._mod_restart_sequence())
+    bot.state.restart_task = asyncio.create_task(bot._mod_restart_sequence(notify=False))
     await interaction.followup.send(embed=discord.Embed(
         title=f"{Emojis.JEEVES} Mod update detected!",
         description=str(updated),
