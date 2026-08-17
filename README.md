@@ -157,6 +157,7 @@ Edit `config.env` with a text editor (Notepad works fine). Every line that says 
 |---------|-------------|
 | `UPDATE_LOG_PATH` | Where the bot stores mod update timestamps (default: next to the exe) |
 | `STEAMCMD_PATH` | Path to SteamCMD (`steamcmd.exe` on Windows, `/usr/games/steamcmd` on Linux) — only needed for `/update` |
+| `UPDATE_BRANCH` | Default SteamCMD branch used by `/update` when no branch is given (default: "unstable"). Use `public` or leave blank for the stable branch |
 | `CHAT_RELAY_CHANNEL_ID` | Discord channel ID for bidirectional chat relay |
 | `CHAT_LOG_PATH` | Path to your PZ server's Logs folder (for chat relay) |
 | `USER_LOG_PATH` | Path to your PZ server's Logs folder (for player tracking) |
@@ -261,7 +262,7 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 | `/restart` | Restart the server immediately. Use `/restart minutes:10` for a countdown |
 | `/skip` | Skip the next scheduled automatic restart |
 | `/unskip` | Cancel a previously issued skip |
-| `/update` | Update the server via SteamCMD (requires STEAMCMD_PATH) |
+| `/update` | Update the server via SteamCMD (requires STEAMCMD_PATH). Use `/update branch:public` to pick a branch; defaults to `UPDATE_BRANCH` |
 
 ### Player Management
 

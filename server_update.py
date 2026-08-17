@@ -4,12 +4,16 @@ Server Update Extension for Jeeves Bot
 Adds a /update slash command that:
   1. Warns connected players and runs a countdown (if players are online)
   2. Gracefully shuts down the PZ server via RCON save + quit
-  3. Launches SteamCMD to update app 380870 (PZ Dedicated Server, unstable beta)
+  3. Launches SteamCMD to update app 380870 (PZ Dedicated Server) on the
+     requested branch — the /update command takes an optional `branch` option,
+     falling back to UPDATE_BRANCH from config.env
   4. Waits for SteamCMD to finish, relaying progress to Discord
   5. Restarts the PZ server
 
 Config (config.env):
   STEAMCMD_PATH=  (Path to steamcmd.exe, default: C:\\SteamCMD\\steamcmd.exe)
+  UPDATE_BRANCH=  (Default SteamCMD branch, default: unstable.
+                   Use "public" or leave blank for the stable branch.)
 """
 
 import asyncio
@@ -26,7 +30,10 @@ _DEFAULT_STEAMCMD = ""
 
 # The full SteamCMD command sequence for updating the PZ dedicated server
 _UPDATE_APP_ID = "380870"
-_UPDATE_BETA = "unstable"
+_DEFAULT_BRANCH = "unstable"
+
+# Branch names that mean "the default stable branch" — no -beta flag at all
+_PUBLIC_BRANCH_NAMES = ("", "public", "none", "default", "stable")
 
 
 class ServerUpdateCog(commands.Cog):
@@ -35,8 +42,12 @@ class ServerUpdateCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._steamcmd_path: str = os.getenv("STEAMCMD_PATH", _DEFAULT_STEAMCMD)
+        self._default_branch: str = os.getenv("UPDATE_BRANCH", _DEFAULT_BRANCH).strip()
         self._update_in_progress = False
-        print(f"[ServerUpdate] Extension loaded. SteamCMD: {self._steamcmd_path}")
+        print(
+            f"[ServerUpdate] Extension loaded. SteamCMD: {self._steamcmd_path} "
+            f"Default branch: {self._default_branch or 'public'}"
+        )
 
     def _install_dir(self) -> str:
         """Derive server install root from MODS_FOLDER_PATH.
@@ -52,12 +63,22 @@ class ServerUpdateCog(commands.Cog):
     # SteamCMD runner                                                      #
     # ------------------------------------------------------------------ #
 
-    async def _run_steamcmd_update(self, channel: Optional[discord.TextChannel] = None) -> bool:
+    async def _run_steamcmd_update(
+        self,
+        channel: Optional[discord.TextChannel] = None,
+        branch: Optional[str] = None,
+    ) -> bool:
         """
         Run SteamCMD to update the PZ dedicated server.
+        `branch` is the SteamCMD beta branch; when omitted the configured
+        default (UPDATE_BRANCH) is used.
         Returns True on success, False on failure.
         Sends progress updates to the given channel if provided.
         """
+        branch = (branch or self._default_branch).strip()
+        use_beta = branch.lower() not in _PUBLIC_BRANCH_NAMES
+        branch_label = branch if use_beta else "public/stable"
+
         if not os.path.isfile(self._steamcmd_path):
             msg = f"SteamCMD not found at `{self._steamcmd_path}`"
             print(f"[ServerUpdate] ERROR: {msg}")
@@ -73,17 +94,16 @@ class ServerUpdateCog(commands.Cog):
         install_dir = self._install_dir()
         if install_dir:
             cmd += ["+force_install_dir", install_dir]
-        cmd += [
-            "+login", "anonymous",
-            "+app_update", _UPDATE_APP_ID, "-beta", _UPDATE_BETA, "validate",
-            "+quit",
-        ]
+        cmd += ["+login", "anonymous", "+app_update", _UPDATE_APP_ID]
+        if use_beta:
+            cmd += ["-beta", branch]
+        cmd += ["validate", "+quit"]
 
         if channel:
             await channel.send(embed=discord.Embed(
                 title=f"{self.bot.Emojis.JEEVES} SteamCMD Update Started",
                 description=(
-                    f"Updating app `{_UPDATE_APP_ID}` (beta: `{_UPDATE_BETA}`)…\n"
+                    f"Updating app `{_UPDATE_APP_ID}` (branch: `{branch_label}`)…\n"
                     "This may take a few minutes."
                 ),
                 colour=discord.Colour.blue(),
@@ -220,7 +240,11 @@ class ServerUpdateCog(commands.Cog):
     # Full update sequence                                                 #
     # ------------------------------------------------------------------ #
 
-    async def _full_update_sequence(self, channel: Optional[discord.TextChannel] = None) -> None:
+    async def _full_update_sequence(
+        self,
+        channel: Optional[discord.TextChannel] = None,
+        branch: Optional[str] = None,
+    ) -> None:
         """Complete update pipeline: countdown → stop → steamcmd → start."""
         self._update_in_progress = True
         try:
@@ -237,7 +261,7 @@ class ServerUpdateCog(commands.Cog):
             await asyncio.sleep(5)
 
             # 3. Run SteamCMD update
-            success = await self._run_steamcmd_update(channel)
+            success = await self._run_steamcmd_update(channel, branch)
 
             # 4. Start the server back up regardless (even if update "failed",
             #    the admin probably wants the server running)
@@ -281,7 +305,14 @@ class ServerUpdateCog(commands.Cog):
         name="update",
         description="Update the PZ dedicated server via SteamCMD (stops server, updates, restarts).",
     )
-    async def cmd_update(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        branch="SteamCMD beta branch (leave empty for the configured default)"
+    )
+    async def cmd_update(
+        self,
+        interaction: discord.Interaction,
+        branch: Optional[str] = None,
+    ) -> None:
         # Guard: only one update at a time
         if self._update_in_progress:
             embed = discord.Embed(
@@ -302,12 +333,18 @@ class ServerUpdateCog(commands.Cog):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
+        # Resolve the branch the same way _run_steamcmd_update will, so the
+        # acknowledgement matches what SteamCMD actually runs.
+        resolved = (branch or self._default_branch).strip()
+        branch_label = resolved if resolved.lower() not in _PUBLIC_BRANCH_NAMES else "public/stable"
+
         # Acknowledge immediately
         await interaction.response.send_message(
             embed=discord.Embed(
                 title=f"{self.bot.Emojis.JEEVES} Server update initiated by {interaction.user.display_name}.",
                 description=(
-                    "The server will be shut down, updated via SteamCMD, and restarted.\n"
+                    f"The server will be shut down, updated via SteamCMD "
+                    f"(branch: `{branch_label}`), and restarted.\n"
                     "Progress updates will appear in this channel."
                 ),
                 colour=discord.Colour.purple(),
@@ -316,7 +353,7 @@ class ServerUpdateCog(commands.Cog):
 
         # Run the full sequence as a background task so we don't block
         channel = interaction.channel
-        asyncio.create_task(self._full_update_sequence(channel))
+        asyncio.create_task(self._full_update_sequence(channel, branch))
 
 
 async def setup(bot: commands.Bot):
