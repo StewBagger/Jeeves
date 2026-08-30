@@ -1,0 +1,13 @@
+# Normalise line endings. Before this file existed the repo stored CRLF while
+# the working tree that feeds it stored LF, so every routine sync showed every
+# file as fully rewritten and real changes were impossible to see in a diff.
+* text=auto eol=lf
+
+# Windows batch files are the exception: cmd.exe wants CRLF.
+*.bat text eol=crlf
+
+# Binary — never touch.
+*.png binary
+*.docx binary
+*.exe binary
+*.zip binary

@@ -12,22 +12,31 @@ import os
 
 block_cipher = None
 
-# Cog modules loaded dynamically via bot.load_extension() — PyInstaller
-# can't auto-detect these, so they must be listed as hidden imports.
+# Cog modules loaded dynamically via bot.load_extension() — PyInstaller cannot
+# see an import that is a string at runtime, so every name in setup_hook()'s
+# extension tuple must be repeated here. THIS LIST HAS TO TRACK THAT TUPLE: when
+# `jeeves_events` was renamed to `horde_events` the spec was not updated, so
+# every exe built after the rename silently shipped without horde night or the
+# leaderboard — the bot started fine and two features simply did not exist.
+# If you add, rename or remove a cog, change it in both places.
 hidden_imports = [
+    # --- cogs, in setup_hook() order ---
     'auto_restart',
     'mod_check_timer',
     'player_tracker',
     'rank_sync',
     'chat_relay',
-    'jeeves_events',
+    'horde_events',
     'jeeves_drops',
     'jeeves_modsorter',
     'jeeves_modmanager',
     'server_update',
     'server_status',
+    'horde_leaderboard',
+    # --- plain modules imported by the cogs ---
     'lua_bridge',
     'mod_sorter',
+    'workshop_acf',
 ]
 
 spec_dir = os.path.dirname(os.path.abspath(SPEC))

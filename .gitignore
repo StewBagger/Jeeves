@@ -1,4 +1,5 @@
-# Credentials
+# Credentials — never commit this file. It holds your Discord token and RCON
+# password. Only config.env.example belongs in the repo.
 config.env
 
 # Python
@@ -6,16 +7,24 @@ __pycache__/
 *.pyc
 *.pyo
 
-# PyInstaller
+# PyInstaller output. The built bot ships as a Releases attachment, not as a
+# committed binary: a checked-in exe goes stale silently while the source moves
+# on, and it is the install path the guides recommend.
 build/
 dist/
+Jeeves.exe
+_internal/
 *.spec.bak
 
-# Runtime data
+# Runtime data written by the bot at run time
 *.lock
 *.db
 rank_links.json
 mod_update_log.json
+supervisor_state.json
+
+# Backups left by in-place upgrades
+*.bak-*
 
 # IDE
 .vscode/

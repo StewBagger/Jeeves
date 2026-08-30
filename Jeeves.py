@@ -96,6 +96,17 @@ class Config:
         # Steam Workshop API (no key required)
         self.STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 
+        # Keyed Workshop API. The keyless endpoint above CANNOT see an unlisted
+        # item -- it answers result 9 with no data at all -- and the local
+        # manifest that used to cover that gap is only rewritten when the game
+        # server boots, which is the same event that installs the update. So an
+        # unlisted mod could never be ANNOUNCED before the restart that had
+        # already applied it. This endpoint answers for unlisted items and is a
+        # live query, so unlisted mods are checked on the same cadence as public
+        # ones. Optional: with no key set, behaviour is exactly as before.
+        self.STEAM_API_KEY = _env('STEAM_API_KEY', '')
+        self.STEAM_PUBLISHEDFILE_URL = "https://api.steampowered.com/IPublishedFileService/GetDetails/v1/"
+
         print(f"Config loaded: RCON={self.RCON_HOST}:{self.RCON_PORT} Guild={self.GUILD_ID} Channel={self.CHANNEL_ID}")
 
     def validate(self) -> List[str]:
@@ -156,6 +167,36 @@ class ServerState:
         self.skip_next_restart = False
         self.last_rcon_ok = False
         self.mod_update_running = False
+
+        # WHEN the server was last shown to be alive, and by what. Until
+        # 2026-08-30 aliveness was the bare `last_rcon_ok` boolean above and
+        # nothing else, which could not answer "alive as of when". That mattered
+        # in two ways. A boolean cannot distinguish a server that has been quiet
+        # for eight minutes from one whose heartbeat task died and left the flag
+        # frozen at its last value -- and a frozen False restarts a healthy
+        # server every 7.5 minutes, for ever. It also could not record that the
+        # evidence came from the mod bridge rather than from RCON, which is the
+        # stronger of the two: see poll_players.
+        self.last_alive_ts: float = 0.0
+        self.alive_source: str = "none"
+
+    def mark_alive(self, source: str) -> None:
+        """Record that the server was observably alive just now.
+
+        Deliberately does NOT touch last_rcon_ok. That flag means one specific
+        thing -- "RCON answered" -- and the bridge answering is not evidence
+        about RCON. Letting this method set it would have made the restart
+        countdown log print `rcon=ok` on a run where RCON was never contacted,
+        which is the same species of quiet inaccuracy as the player parse.
+        """
+        self.last_alive_ts = time.time()
+        self.alive_source = source
+
+    def seconds_since_alive(self) -> Optional[float]:
+        """Seconds since the last positive sign of life, or None if never seen."""
+        if self.last_alive_ts <= 0:
+            return None
+        return max(0.0, time.time() - self.last_alive_ts)
 
 
 # =============================================================================
@@ -249,7 +290,28 @@ class ModChecker:
         return []
 
     async def _fetch_workshop_state(self, workshop_ids: List[str]) -> Dict:
-        """Fetch current update times from Steam API (no API key required)."""
+        """Current update times per Workshop id, from Steam's API where it can
+        answer and from Steam's own local manifest where it cannot.
+
+        The API used here is keyless, and it CANNOT SEE UNLISTED ITEMS: it
+        answers result 9 with no time_updated and no title. This method used to
+        ignore result entirely, take the entry anyway, and substitute defaults --
+        time 0 and "Unknown Mod" -- so an unlisted mod compared 0 > 0, never
+        reported an update, and then had that 0 written back over its baseline.
+        Silent, permanent, and worst for exactly the mods that change most.
+
+        So a non-success entry is now DISCARDED rather than defaulted. What the
+        keyless endpoint refuses is then resolved in two steps, in this order:
+
+          1. IPublishedFileService/GetDetails, which needs an API key but CAN
+             see an unlisted item, and is a LIVE query -- so an unlisted mod is
+             detected on the same cadence as a public one.
+          2. steamapps/workshop/appworkshop_108600.acf, the local manifest.
+             Correct but LAGGING: latest_timeupdated only advances when the game
+             server boots, which is also when the update gets installed, so on
+             its own this can never announce an update before it has already
+             been applied. It is the no-key fallback, not the primary source.
+        """
         if not workshop_ids:
             return {}
 
@@ -257,20 +319,146 @@ class ModChecker:
         for i, item_id in enumerate(workshop_ids):
             data[f'publishedfileids[{i}]'] = item_id
 
+        state: Dict = {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(self.config.STEAM_API_URL, data=data)
                 resp.raise_for_status()
-                return {
-                    str(item['publishedfileid']): {
+                for item in resp.json().get('response', {}).get('publishedfiledetails', []):
+                    item_id = str(item.get('publishedfileid'))
+                    if item.get('result') != 1:
+                        # Steam said it cannot see this. Say so and move on --
+                        # inventing a timestamp here is what hid the bug before.
+                        print(f"  Steam API cannot see {item_id} "
+                              f"(result={item.get('result')}); trying local manifest.")
+                        continue
+                    state[item_id] = {
                         'time': item.get('time_updated', 0),
-                        'title': item.get('title', 'Unknown Mod')
+                        'title': item.get('title', 'Unknown Mod'),
+                        'source': 'api',
                     }
-                    for item in resp.json().get('response', {}).get('publishedfiledetails', [])
-                }
             except Exception as e:
                 print(f"Steam API error: {e}")
-        return {}
+
+        missing = [i for i in workshop_ids if i not in state]
+        if missing and self.config.STEAM_API_KEY:
+            state.update(await self._fetch_state_from_keyed_api(missing))
+
+        missing = [i for i in workshop_ids if i not in state]
+        if missing:
+            state.update(self._fetch_state_from_manifest(missing))
+
+        still_missing = [i for i in workshop_ids if i not in state]
+        if still_missing:
+            # Named, not swallowed: an id nothing can resolve is invisible to
+            # update detection, and that has to be visible to a human.
+            print(f"  !! no update source for {len(still_missing)} id(s): "
+                  f"{', '.join(still_missing)}")
+        return state
+
+    async def _fetch_state_from_keyed_api(self, workshop_ids: List[str]) -> Dict:
+        """Live lookup for the ids the keyless endpoint refuses to answer for.
+
+        This is the one that makes an unlisted mod behave like a public one.
+        ISteamRemoteStorage answers result 9 for an unlisted item; this service
+        answers properly, and because it is a live query it sees an upload the
+        moment it happens -- unlike the local manifest, whose latest_timeupdated
+        only advances when the game server boots and fetches the update anyway.
+
+        This service is GET-only -- a POST is answered with HTTP 405 -- so the
+        key unavoidably travels in the query string. That makes the logging
+        discipline here load-bearing rather than stylistic: NOTHING in this
+        method may print an exception, a URL, or a response body, because an
+        httpx error stringifies the request URL and would put the key straight
+        into the bot log and from there into Discord. Status codes, exception
+        CLASS names, and ids only. Keep it that way.
+        """
+        params = {'key': self.config.STEAM_API_KEY}
+        for i, item_id in enumerate(workshop_ids):
+            params[f'publishedfileids[{i}]'] = item_id
+        params['includetags'] = 'false'
+        params['includeadditionalpreviews'] = 'false'
+        params['includechildren'] = 'false'
+
+        out: Dict = {}
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(self.config.STEAM_PUBLISHEDFILE_URL, params=params)
+                if resp.status_code != 200:
+                    # 401/403 means the key is missing, wrong, or not entitled to
+                    # see these items. Say which, without echoing anything sent.
+                    print(f"  keyed Workshop API refused the lookup "
+                          f"(HTTP {resp.status_code}); falling back to the local manifest.")
+                    return {}
+                details = resp.json().get('response', {}).get('publishedfiledetails', [])
+        except Exception as e:
+            print(f"  keyed Workshop API error ({type(e).__name__}); "
+                  f"falling back to the local manifest.")
+            return {}
+
+        for item in details:
+            item_id = str(item.get('publishedfileid'))
+            if item.get('result') != 1:
+                continue
+            when = item.get('time_updated') or item.get('time_created') or 0
+            try:
+                when = int(when)
+            except (TypeError, ValueError):
+                when = 0
+            if when <= 0:
+                # No usable timestamp is not a baseline. Leave it for the manifest
+                # rather than recording a zero -- recording zeros is the original bug.
+                continue
+            title = item.get('title')
+            if not title:
+                try:
+                    import workshop_acf
+                    title = workshop_acf.read_item_title(self.config.MODS_FOLDER_PATH, item_id)
+                except Exception:
+                    title = None
+            out[item_id] = {
+                'time': when,
+                'title': title or f"Workshop item {item_id}",
+                'source': 'api-keyed',
+            }
+
+        if out:
+            print(f"  keyed Workshop API resolved {len(out)} unlisted id(s): "
+                  f"{', '.join(sorted(out))}")
+        return out
+
+    def _fetch_state_from_manifest(self, workshop_ids: List[str]) -> Dict:
+        """Fallback source: Steam's local appworkshop manifest.
+
+        Cross-checked against the API on ids it CAN answer for, and the values
+        agree exactly, so this is an equivalent source rather than an
+        approximation -- and it is the only source for an unlisted item.
+        """
+        try:
+            import workshop_acf
+        except ImportError as e:
+            print(f"  manifest fallback unavailable: {e}")
+            return {}
+
+        acf = workshop_acf.acf_path_from_mods_folder(self.config.MODS_FOLDER_PATH)
+        if not acf:
+            print("  manifest fallback: appworkshop manifest not found "
+                  "(is MODS_FOLDER_PATH the .../content/108600 dir?)")
+            return {}
+
+        times = workshop_acf.read_item_times(acf, workshop_ids)
+        out: Dict = {}
+        for item_id, when in times.items():
+            title = workshop_acf.read_item_title(self.config.MODS_FOLDER_PATH, item_id)
+            out[item_id] = {
+                'time': when,
+                'title': title or f"Workshop item {item_id}",
+                'source': 'manifest',
+            }
+        if out:
+            print(f"  manifest supplied {len(out)} id(s) the API could not: "
+                  f"{', '.join(sorted(out))}")
+        return out
 
     def _load_state(self) -> Dict:
         if os.path.exists(self.config.UPDATE_LOG_PATH):
@@ -301,10 +489,24 @@ class ModChecker:
             print("Failed to fetch mod data from Steam.")
             return []
 
-        updated = [
-            info['title'] for mod_id, info in current.items()
-            if mod_id in previous and info['time'] > previous[mod_id]['time']
-        ]
+        # A stored time of 0 is not "very old", it is NO BASELINE. Unlisted mods
+        # were previously recorded as 0 because the API could not see them and
+        # this code defaulted the missing value; the first run after that is
+        # fixed would otherwise see 0 -> a real timestamp, call it an update, and
+        # restart a live server for every one of them at once. Treat 0 as
+        # unknown, adopt the real value silently, and compare from next time.
+        updated = []
+        for mod_id, info in current.items():
+            was = previous.get(mod_id)
+            if not was:
+                continue                       # newly tracked: adopt, do not announce
+            base = was.get('time', 0)
+            if base <= 0:
+                print(f"  baseline for {mod_id} was unknown; adopting {info['time']} "
+                      f"without reporting an update.")
+                continue
+            if info['time'] > base:
+                updated.append(info['title'])
 
         self._save_state(current)
         print(f"🚨 Updates: {', '.join(updated)}" if updated else "✅ All mods current.")
@@ -327,6 +529,16 @@ class ModChecker:
 # =============================================================================
 
 _IS_WINDOWS = sys.platform == "win32"
+
+# How stale the mod's world-status file may be before the bot stops believing
+# it. JeevesWorldStatus.lua writes every 30 s (WRITE_INTERVAL_MS = 30000), so
+# 90 s is three consecutive missed writes. One missed write is a busy tick; three
+# is a game loop that has stopped, which is the thing worth reacting to.
+#
+# Do not raise this much past a restart's own duration. Its other job is to stop
+# the bot reading a status file left behind by a server that has since died, and
+# a window longer than the gap between shutdown and boot would do exactly that.
+WORLD_STATUS_MAX_AGE = 90.0
 
 def _tasklist(filter_str: str, timeout: int = 10) -> str:
     """Run tasklist (Windows) or ps (Linux) with the given filter and return output."""
@@ -614,92 +826,174 @@ class PZBot(commands.Bot):
         return False
 
     async def poll_players(self) -> Optional[str]:
-        """Single RCON call that updates all player state. Used by all polling loops."""
+        """Update player state, preferring the mod bridge and falling back to RCON.
+
+        WHY THE BRIDGE IS ASKED FIRST
+            JeevesWorldStatus.lua builds this roster from ``getOnlinePlayers()``
+            -- the engine's own list -- and writes it every 30 seconds. RCON's
+            `players` is the same fact rendered as English prose which we then
+            re-parse by hunting for a leading "-" and the literal string
+            "Players connected (". Any build that rewords that output returns
+            zero players and reports no error at all.
+
+            A wrong zero is not inert. ``players_online`` is what decides
+            whether a restart broadcasts a countdown to the people in the world
+            (see the restart paths and server_update), so a parse that quietly
+            fails is a restart that quietly drops players without warning them.
+
+            The bridge is also better evidence of a different kind. RCON
+            answering proves a socket handler is alive. A fresh status file
+            proves the GAME LOOP ran, because only OnTick writes it. Those come
+            apart exactly when it matters -- a server thrashing badly enough to
+            stop ticking can still complete an RCON handshake -- and conflating
+            them is why this bot has restarted servers that were merely busy.
+
+        RCON REMAINS THE FALLBACK AND IS STILL FULLY SUPPORTED
+            A server without Jeeve's Integration, or with the DiscordBridge
+            sandbox option off, has no status file. Those keep precisely the old
+            behaviour, so this is an upgrade where the mod is present and a
+            no-op where it is not.
+        """
+        status, age = lua_bridge.read_world_status_with_age()
+
+        if (status is not None and age is not None
+                and age <= WORLD_STATUS_MAX_AGE
+                and status.get('playerCount') is not None):
+            try:
+                count = int(status['playerCount'])
+            except (TypeError, ValueError):
+                count = None
+
+            if count is not None:
+                # `players` is table.concat(names, ", ") written by the mod, and
+                # is the empty string when nobody is on. Names are usernames,
+                # the same identifier RCON reports, so downstream comparisons
+                # against player_names are unaffected by which source won.
+                raw = str(status.get('players', '') or '')
+                names = {n.strip() for n in raw.split(',') if n.strip()}
+
+                self.state.player_names = names
+                self.state.player_count = count
+                self.state.players_online = count > 0
+                self.state.mark_alive('bridge')
+                return None
+
+        # No usable bridge data — fall back to RCON.
         response = await self.rcon.send_command('players')
         if response is not None:
             self.state.last_rcon_ok = True
             self.state.player_names, self.state.player_count = self.rcon.parse_players(response)
             self.state.players_online = self.state.player_count > 0
+            self.state.mark_alive('rcon')
         else:
             self.state.last_rcon_ok = False
         return response
 
     # ---- Horde Night Restart Guard ----
 
-    def _is_horde_blocking_restart(self, real_minutes_ahead=0) -> tuple:
+    # How long any horde deferral waits for the event to clear before giving up
+    # and restarting anyway, and how often it re-asks. They live on the bot so
+    # the AutoRestart cog reaches them through self.bot rather than importing
+    # this module, which is __main__ at run time. Shared so the two defer paths
+    # cannot drift apart: until 2026-08-20 only the mod-update path had a cap at
+    # all, and a status file stuck mid-event would have stopped every scheduled
+    # restart from then on without saying so.
+    HORDE_DEFER_TIMEOUT = 3 * 60 * 60   # seconds
+    HORDE_DEFER_POLL = 60               # seconds
+
+    # Phases that mean the horde itself is over but its tail is not: the lure
+    # window and the boosted airdrop it hands off to. A restart here destroys
+    # the drop. They block for a bounded grace period measured from the status
+    # file's own timestamp, because nothing rewrites the file to say the tail
+    # ended — the next write is the next boot, which may be hours away.
+    _HORDE_TAIL_PHASES = ("ended", "dropped", "expired")
+    _HORDE_TAIL_GRACE = 20 * 60       # seconds
+    # How long a phase="active" file is believed. A horde runs about two
+    # in-game hours; a file older than this is one nobody is updating, not a
+    # horde that has lasted all day. Without the cap a status file stuck on
+    # "active" blocks every future restart and says nothing about why.
+    _HORDE_ACTIVE_MAX_AGE = 45 * 60   # seconds
+
+    def _is_horde_blocking_restart(self) -> tuple:
         """Check if a horde event should block a server restart.
         Returns (should_block, reason_string).
 
-        real_minutes_ahead: how many real-world minutes until the restart
-        would actually execute. The method projects the in-game time forward
-        by that amount using the server's DayLength setting (hoursForDay).
-
-        Conversion: 1 in-game day = hoursForDay real hours.
-        So 1 in-game hour = hoursForDay/24 real hours = hoursForDay*2.5 real minutes.
-        Inverse: 1 real minute = 24/(hoursForDay*60) in-game hours.
-
         Blocks if:
-          - Horde is currently active
-          - Horde is scheduled for today AND the current or projected
-            in-game time falls inside or near the night window (19:00+)
-          - Currently in the post-midnight tail of the window (before 7 AM)
+          - a horde is running, including when the file was last written by the
+            /horde status command rather than by the event itself
+          - the lure window or its airdrop tail is still settling
+          - today is horde night, from the moodle onward
 
-        Day offset: The Lua horde scheduler's nextHordeDay runs 1 ahead of
-        what the world status bridge reports as elapsedDays. The status page
-        subtracts 1 from nextHordeDay for display; this function must apply
-        the same offset when comparing against the current day.
+        WHY THERE IS NO DAY ARITHMETIC HERE ANY MORE. This used to compare the
+        horde file's nextHordeDay against the world bridge's elapsedDays, with a
+        hardcoded `- 1` to reconcile them. Those two counters do not share a
+        basis and the offset between them is not a constant: elapsedDays is
+        computed from the in-game calendar and rolls at midnight, while
+        JH_GetActualDay() floors getWorldAgeDays() and rolls at whatever
+        time-of-day the world was created — in-game 07:00 on ODYN. So the offset
+        is 1 for seventeen in-game hours a day and 0 for the other seven, and the
+        guard was a full day wrong between midnight and 07:00: it deferred
+        restarts about fifteen in-game hours before a horde that had not been
+        scheduled yet, then went quiet for the twelve in-game hours after the
+        moodle when every player can see it is horde night. On 2026-08-20 that
+        put a mod-update restart on the server one in-game hour after the horde
+        moodle went up.
+
+        eventDay and nextHordeDay are both JH_GetActualDay() values written by
+        the same module in the same file, so comparing them to each other needs
+        no offset and cannot drift. Their equality is exactly the condition the
+        mod itself uses to raise the moodle, which makes the bot's idea of
+        "horde night" the same object as the player's. See Jeeves DR-0081.
         """
         horde = lua_bridge.read_horde_status()
-        world = lua_bridge.read_world_status()
 
         if not horde:
             return False, ""
 
         phase = horde.get("phase", "")
+        written = horde.get("timestamp")
+        age = None
+        if isinstance(written, (int, float)):
+            age = int(time.time()) - int(written)
 
-        # Active horde — always block
-        if phase == "active":
+        # Horde in progress. `phase` alone is not enough: JeevesCommandServer's
+        # status handler rewrites this same file with phase="status", which
+        # erased "active" and silently disarmed the whole guard. That write
+        # carries its own `active` flag, so read it.
+        if phase == "active" or horde.get("active") is True:
+            if phase == "active" and age is not None and age > self._HORDE_ACTIVE_MAX_AGE:
+                print(f"[HordeGuard] Ignoring stale active status ({age}s old) - not blocking")
+                return False, ""
             return True, "Horde night is currently active"
 
-        # Check if horde is scheduled for today and window is imminent
-        if phase == "scheduled" and world:
+        # The lure window and the boosted airdrop run on after the horde ends.
+        if horde.get("lurePhase") is True:
+            return True, "Horde lure window still running"
+        if phase in self._HORDE_TAIL_PHASES:
+            if age is None or age <= self._HORDE_TAIL_GRACE:
+                return True, f"Horde aftermath still settling (phase {phase})"
+            return False, ""
+
+        # Horde night, from the moodle onward.
+        if phase == "scheduled":
+            event_day = horde.get("eventDay")
             next_day = horde.get("nextHordeDay")
-            if next_day is not None:
-                # Use elapsedDays (accurate date-based count from bridge)
-                # with fallback to worldAgeDays. Match the status page logic.
-                elapsed = world.get("elapsedDays")
-                if elapsed is not None:
-                    current_day = int(elapsed)
-                else:
-                    age_raw = world.get("worldAgeDays", 0)
-                    current_day = int(age_raw) if age_raw >= 1 else max(1, int(age_raw))
-
-                hour = world.get("hour", 12)
-
-                # Calculate in-game hours that will pass in real_minutes_ahead
-                hours_for_day = world.get("hoursForDay", 2)
-                if hours_for_day <= 0:
-                    hours_for_day = 2
-                # 1 real minute = 24 / (hoursForDay * 60) in-game hours
-                ig_hours_per_real_min = 24.0 / (hours_for_day * 60)
-                lookahead_ig_hours = real_minutes_ahead * ig_hours_per_real_min
-                projected_hour = hour + lookahead_ig_hours
-
-                # nextHordeDay is 1 ahead of the in-game display day.
-                # Subtract 1 to align with current_day (same offset as
-                # server_status._horde_fields).
-                display_horde_day = next_day - 1
-
-                if display_horde_day == current_day:
-                    if hour >= 19 or projected_hour >= 19:
-                        return True, (f"Horde night tonight (day {display_horde_day}), "
-                                      f"in-game {hour}:00, projected {projected_hour:.0f}:00 "
-                                      f"in {real_minutes_ahead}m")
-                    # Post-midnight tail of tonight's window
-                    if hour < 7:
-                        return True, f"Horde night active (day {display_horde_day}), in-game {hour}:00 (post-midnight)"
+            if event_day is not None and next_day is not None and event_day == next_day:
+                return True, f"Horde night tonight (day {next_day}){self._ingame_clock_suffix()}"
 
         return False, ""
+
+    def _ingame_clock_suffix(self) -> str:
+        """In-game clock for the deferral message, or "" if the world bridge is
+        not there. Cosmetic only — the decision above never consults it, which
+        is the point. It used to, and that is what went wrong."""
+        world = lua_bridge.read_world_status()
+        if not world:
+            return ""
+        hour = world.get("hour")
+        if hour is None:
+            return ""
+        return f", in-game {int(hour):02d}:{int(world.get('minutes') or 0):02d}"
 
     # ---- Mod Restart Logic ----
 
@@ -718,20 +1012,21 @@ class PZBot(commands.Bot):
     async def _mod_restart_sequence(self, notify: bool = True) -> None:
         try:
             # Check if a horde night would be interrupted.
-            # Mod restart countdown takes ~15 real minutes = ~3 in-game hours.
-            blocked, reason = self._is_horde_blocking_restart(real_minutes_ahead=15)
+            blocked, reason = self._is_horde_blocking_restart()
             if blocked:
                 print(f"[ModRestart] Deferred: {reason}")
                 await self.send_notification(
                     f"{Emojis.JEEVES} Mod update restart deferred — {reason}. Will retry after the event.",
                     discord.Colour.orange()
                 )
-                # Wait and retry every 5 minutes until the horde clears.
-                # Safety limit: give up after 2 hours to prevent infinite loops
-                # if the horde status file is stale.
-                MAX_HORDE_WAIT = 24  # 24 × 5 min = 2 hours
+                # Poll until the horde clears. The cap exists so a status file
+                # that never leaves its phase cannot hold a mod update forever;
+                # it is three hours because the guard now covers horde night
+                # from the moodle, which is about 75 real minutes on its own,
+                # plus the event and its airdrop tail.
+                MAX_HORDE_WAIT = self.HORDE_DEFER_TIMEOUT // self.HORDE_DEFER_POLL
                 for _ in range(MAX_HORDE_WAIT):
-                    await asyncio.sleep(300)
+                    await asyncio.sleep(self.HORDE_DEFER_POLL)
                     blocked, reason = self._is_horde_blocking_restart()
                     if not blocked:
                         print("[ModRestart] Horde cleared, proceeding with restart.")
@@ -741,9 +1036,10 @@ class PZBot(commands.Bot):
                         )
                         break
                 else:
-                    print("[ModRestart] Horde wait exceeded 2 hours — proceeding anyway.")
+                    hours = self.HORDE_DEFER_TIMEOUT // 3600
+                    print(f"[ModRestart] Horde wait exceeded {hours} hours - proceeding anyway.")
                     await self.send_notification(
-                        f"{Emojis.JEEVES} Horde wait exceeded 2 hours — proceeding with mod update restart.",
+                        f"{Emojis.JEEVES} Horde wait exceeded {hours} hours — proceeding with mod update restart.",
                         discord.Colour.orange()
                     )
 
@@ -778,11 +1074,17 @@ class PZBot(commands.Bot):
             for check_num in range(checks):
                 await asyncio.sleep(10)
                 await self.poll_players()
-                rcon_ok = "ok" if self.state.last_rcon_ok else "FAIL"
+                # Report WHICH source answered, not just that something did.
+                # This used to print rcon=ok/FAIL unconditionally; now that the
+                # roster can come from the mod bridge instead, naming the source
+                # is the difference between a log that explains a surprising
+                # player count and one that hides it.
+                age = self.state.seconds_since_alive()
+                alive = "FAIL" if age is None else f"{self.state.alive_source} {age:.0f}s ago"
                 players = self.state.player_count if self.state.players_online else 0
-                if (check_num + 1) % 5 == 0 or not self.state.last_rcon_ok:
+                if (check_num + 1) % 5 == 0 or age is None:
                     print(f"[RestartCountdown] {label} — check {check_num + 1}/{checks} "
-                          f"rcon={rcon_ok} players={players}")
+                          f"alive={alive} players={players}")
                 if not self.state.players_online:
                     consecutive_empty += 1
                     if consecutive_empty >= EMPTY_CHECKS_REQUIRED:
@@ -1030,6 +1332,26 @@ async def cmd_teleport(interaction: discord.Interaction, player1: str, player2: 
     await _respond(interaction, f"Attempting to teleport {player1} to {player2}'s location.")
 
 
+@bot.tree.command(name="setaccesslevel", description="Sets a player's access level on the server.")
+@require_role(config.DEFAULT_ROLE)
+async def cmd_setaccesslevel(interaction: discord.Interaction, player: str, level: str) -> None:
+    valid_levels = ["admin", "moderator", "overseer", "gm", "observer", "none"]
+    if level.lower() not in valid_levels:
+        await _respond(interaction, f"Invalid access level: {level}. Valid: {', '.join(valid_levels)}", discord.Colour.red())
+        return
+    await bot.rcon.send_command(f'setaccesslevel "{player}" "{level.lower()}"')
+    await _respond(interaction, f"Set {player}'s access level to **{level.lower()}**.")
+
+
+@cmd_setaccesslevel.autocomplete("level")
+async def _accesslevel_autocomplete(interaction: discord.Interaction, current: str):
+    levels = ["admin", "moderator", "overseer", "gm", "observer", "none"]
+    return [
+        app_commands.Choice(name=lvl, value=lvl)
+        for lvl in levels if current.lower() in lvl.lower()
+    ]
+
+
 @bot.tree.command(name="msg", description="Broadcasts a message to the server.")
 @require_role(config.DEFAULT_ROLE)
 async def cmd_msg(interaction: discord.Interaction, message: str) -> None:
@@ -1102,7 +1424,6 @@ async def cmd_postpone(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(name="mod", description="Checks if the server's mods are up to date.")
-@require_role(config.DEFAULT_ROLE)
 async def cmd_mod(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     updated = await bot.mod_checker.check_for_updates()
@@ -1246,7 +1567,7 @@ async def cmd_myrank(interaction: discord.Interaction) -> None:
         interaction,
         f"{emoji} {name} — Rank {highest}",
         description=f"Your in-game chat name color: **{color}**\n"
-                    f"Use `/jeevesrank` in-game to verify your rank.",
+                    f"Your rank shows in-game as your chat name color.",
     )
 
 

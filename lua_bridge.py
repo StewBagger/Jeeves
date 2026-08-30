@@ -5,9 +5,9 @@ The bot writes command files to the Zomboid/Lua/ directory and the
 JeevesIntegration server mod polls for them.
 
 Two command files to avoid queueing delays:
-  jeeves_commands.lua  — General commands (broadcast sounds, playsound,
+  jeeves_commands.txt  — General commands (broadcast sounds, playsound,
                          rankpush, horde, etc.)
-  jeeves_chat.lua      — Dedicated chat relay file. Discord messages are
+  jeeves_chat.txt      — Dedicated chat relay file. Discord messages are
                          written here so they never queue behind broadcasts.
 
 Architecture:
@@ -38,8 +38,8 @@ _write_lock = asyncio.Lock()
 _chat_lock = asyncio.Lock()
 
 # Filenames the Jeeves Integration mod watches for
-COMMAND_FILE = "jeeves_commands.lua"
-CHAT_FILE = "jeeves_chat.lua"
+COMMAND_FILE = "jeeves_commands.txt"
+CHAT_FILE = "jeeves_chat.txt"
 
 
 def init(bot) -> Path:
@@ -67,12 +67,40 @@ def get_lua_dir() -> Optional[Path]:
 
 
 def _escape_lua_string(s: str) -> str:
-    """Escape a Python string for safe embedding in a Lua string literal."""
-    return (s
-            .replace('\\', '\\\\')
-            .replace('"', '\\"')
-            .replace('\n', '\\n')
-            .replace('\r', '\\r'))
+    """Escape a Python string for safe embedding in a Lua string literal.
+
+    Non-ASCII is emitted as Lua decimal byte escapes (\\ddd) of its UTF-8
+    bytes, so the file we hand to the game is pure ASCII.
+
+    Why: the mod reads these files and runs them through Kahlua's
+    loadstring(). Kahlua encodes the source to UTF-8 bytes correctly
+    (LuaCompiler.loadstring -> source.getBytes("UTF-8")) and then decodes
+    them back with `new InputStreamReader(inputStream)` and NO charset
+    argument (LuaCompiler.loadis) -- i.e. the JVM platform default, which on
+    a Windows-hosted server is not UTF-8. Multi-byte characters get
+    mis-decoded, which is why Discord->game chat mangled Cyrillic while
+    game->Discord (a plain Python file tail, never touching loadstring) was
+    always fine. Pure ASCII source is charset-invariant, so escaping side-
+    steps the engine bug; the escapes decode back to the original UTF-8
+    bytes inside Lua, and Kahlua strings are byte-transparent from there.
+    """
+    out = []
+    for ch in s:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ' ' <= ch <= '~':
+            out.append(ch)
+        else:
+            # Anything outside printable ASCII (incl. all non-Latin scripts
+            # and emoji) becomes \ddd escapes of its UTF-8 bytes.
+            out.extend('\\%d' % b for b in ch.encode('utf-8'))
+    return ''.join(out)
 
 
 def _build_lua_table(command: str, cmd_id: int, **kwargs) -> str:
@@ -133,7 +161,7 @@ async def _write_file(filepath: Path, lock: asyncio.Lock, content: str, label: s
 
 
 async def write_command(command: str, **kwargs) -> bool:
-    """Write a command to jeeves_commands.lua."""
+    """Write a command to jeeves_commands.txt."""
     if _lua_dir is None:
         print("[LuaBridge] ERROR: Not initialized! Call lua_bridge.init(bot) first.")
         return False
@@ -148,7 +176,7 @@ async def write_command(command: str, **kwargs) -> bool:
 
 
 async def write_chat(author: str, message: str) -> bool:
-    """Write a chat relay command to jeeves_chat.lua (dedicated file)."""
+    """Write a chat relay command to jeeves_chat.txt (dedicated file)."""
     if _lua_dir is None:
         print("[LuaBridge] ERROR: Not initialized! Call lua_bridge.init(bot) first.")
         return False
@@ -263,8 +291,8 @@ async def supply_event_status() -> bool:
 # Horde status file reader (server -> bot communication)
 # =========================================================================
 
-HORDE_STATUS_FILE = "jeeves_horde_status.lua"
-DROPS_STATUS_FILE = "jeeves_drops_status.lua"
+HORDE_STATUS_FILE = "jeeves_horde_status.txt"
+DROPS_STATUS_FILE = "jeeves_drops_status.txt"
 
 
 def read_horde_status() -> dict | None:
@@ -380,8 +408,8 @@ def read_drops_status() -> dict | None:
         return None
 
 
-WORLD_STATUS_FILE = "jeeves_world_status.lua"
-SUPPLY_EVENT_STATUS_FILE = "jeeves_supply_event_status.lua"
+WORLD_STATUS_FILE = "jeeves_world_status.txt"
+SUPPLY_EVENT_STATUS_FILE = "jeeves_supply_event_status.txt"
 
 
 def read_world_status() -> dict | None:
@@ -437,6 +465,34 @@ def read_world_status() -> dict | None:
     except Exception as e:
         print(f"[LuaBridge] Failed to read world status: {e}")
         return None
+
+
+def read_world_status_with_age() -> tuple[dict | None, float | None]:
+    """read_world_status(), plus how many seconds ago the file was written.
+
+    Age is taken from the FILESYSTEM mtime, not from the `timestamp` field the
+    mod writes into the table. Both are available and they agree -- verified
+    2026-08-30 against the live servers, where the embedded timestamp decoded to
+    exactly the mtime -- but they are not equally safe to depend on. The
+    embedded value is the game server's own clock; mtime is ours. If the bot is
+    ever moved off the box that runs the server, a clock a few minutes out would
+    make a perfectly fresh file look stale, or a stale one look current. The
+    second of those silently re-arms every failure this freshness check exists
+    to prevent, so the reading that cannot skew is the one used.
+
+    Returns (None, None) when there is no file: a server without Jeeve's
+    Integration, or with the bridge sandbox option switched off.
+    """
+    if _lua_dir is None:
+        return None, None
+
+    filepath = _lua_dir / WORLD_STATUS_FILE
+    try:
+        age = max(0.0, time.time() - filepath.stat().st_mtime)
+    except OSError:
+        return None, None
+
+    return read_world_status(), age
 
 
 def read_supply_event_status() -> dict | None:
@@ -498,7 +554,7 @@ def read_supply_event_status() -> dict | None:
 # Horde survivor data reader (leaderboard)
 # =========================================================================
 
-SURVIVOR_FILE = "jeeves_horde_survivors.lua"
+SURVIVOR_FILE = "jeeves_horde_survivors.txt"
 
 
 def read_survivor_data() -> dict | None:

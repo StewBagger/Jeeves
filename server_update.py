@@ -26,7 +26,22 @@ _DEFAULT_STEAMCMD = ""
 
 # The full SteamCMD command sequence for updating the PZ dedicated server
 _UPDATE_APP_ID = "380870"
-_UPDATE_BETA = "unstable"
+
+# Steam branch to track. "public" since 2026-07-29: B42 was promoted to stable and Steam
+# RETIRED the "unstable" branch entirely — it is no longer in the branch list for 380870
+# (public / 42.19 / legacy41 / outdatedunstable). Left pointing at "unstable" this fed
+# SteamCMD a branch that does not exist, which pinned the install to an orphaned build and
+# left the server running 42.19 for five hours while every update reported success.
+#
+# Named explicitly rather than left empty for two reasons:
+#   - `-beta` is passed unconditionally below, so "" would emit a literal `-beta ""`.
+#   - Passing the branch every time RE-ASSERTS it. Omitting -beta inherits whatever the
+#     install's own appmanifest already records (UserConfig/BetaKey), so a stale pin
+#     survives silently — clearing this constant alone does NOT move an install.
+#
+# Verify against Steam's real branch list before changing it; branch names are TIS's to
+# reuse, and the meaning of a name moves after a promotion.
+_UPDATE_BETA = "public"
 
 
 class ServerUpdateCog(commands.Cog):

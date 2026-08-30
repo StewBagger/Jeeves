@@ -1,442 +1,493 @@
 # JeevesBot — Project Zomboid Server Management
 
-A Discord bot that manages a Project Zomboid dedicated server. Features include RCON control, mod update detection, automatic restarts, chat relay, player tracking, rank synchronization, and integration with the Jeeves mod ecosystem.
+A Discord bot for running a Project Zomboid dedicated server: lifecycle control,
+scheduled restarts, mod update detection, chat relay, player tracking, rank
+colours, and event control for the Jeeves Ecosystem mods.
+
+Runs on **Windows and Linux**. Talks to the server over RCON, and to the Jeeves
+mods through a small file bridge.
+
+> **This release is the build that actually runs the ODYN servers.** Every file
+> here was verified byte-identical against the two live boxes before publishing,
+> rather than assembled from a development branch. If it is in this repo, it is
+> in production.
 
 ---
 
 ## Table of Contents
 
 1. [Requirements](#requirements)
-2. [Creating a Discord Bot](#creating-a-discord-bot)
-3. [Installation](#installation)
+2. [Installation](#installation)
+3. [Creating a Discord Bot](#creating-a-discord-bot)
 4. [Configuration](#configuration)
 5. [Running the Bot](#running-the-bot)
 6. [Commands](#commands)
 7. [Features](#features)
-8. [Jeeves Ecosystem](#jeeves-ecosystem)
+8. [The Jeeves Ecosystem](#the-jeeves-ecosystem)
 9. [Building from Source](#building-from-source)
 10. [Troubleshooting](#troubleshooting)
+11. [Contributing](#contributing)
 
 ---
 
 ## Requirements
 
-- **Windows or Linux** — The bot runs on the same machine as your PZ dedicated server. Both platforms are fully supported.
-- **Project Zomboid Dedicated Server** — Installed via SteamCMD with RCON enabled.
-- **Discord Account** — You need to create a Discord bot application (free).
-- **SteamCMD** *(optional)* — Only required if you want to use the `/update` command to update the server from Discord.
-
-If running from the pre-built executable, no Python installation is needed.
-If running from source or building yourself, you need **Python 3.10+**.
-
----
-
-## Creating a Discord Bot
-
-Before you can use JeevesBot, you need to create a Discord bot application and invite it to your server. This is free and takes about 5 minutes.
-
-### Step 1: Create the Application
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **"New Application"** in the top right
-3. Name it something like "Jeeves" and click **Create**
-4. On the **General Information** page, you can optionally upload an avatar for the bot
-
-### Step 2: Create the Bot User
-
-1. Click **"Bot"** in the left sidebar
-2. Click **"Reset Token"** and copy the token — **save this somewhere safe, you will need it for config.env**. You can only see the token once. If you lose it, you'll need to reset it again.
-3. Under **Privileged Gateway Intents**, enable all three:
-   - **Presence Intent** — ✅
-   - **Server Members Intent** — ✅ (required for rank sync)
-   - **Message Content Intent** — ✅ (required for chat relay)
-
-### Step 3: Set Bot Permissions
-
-1. Click **"OAuth2"** in the left sidebar
-2. Under **OAuth2 URL Generator**, check the **"bot"** and **"applications.commands"** scopes
-3. Under **Bot Permissions**, check:
-   - Send Messages
-   - Embed Links
-   - Read Message History
-   - Use Slash Commands
-   - Manage Messages *(optional, for chat relay cleanup)*
-4. Copy the generated URL at the bottom
-
-### Step 4: Invite the Bot to Your Server
-
-1. Paste the URL from Step 3 into your browser
-2. Select your Discord server from the dropdown
-3. Click **Authorize**
-4. The bot should now appear in your server's member list (offline until you start it)
-
-### Step 5: Get Your Server and Channel IDs
-
-You need two Discord IDs for the configuration:
-
-1. **Enable Developer Mode**: In Discord, go to User Settings → Advanced → Enable **Developer Mode**
-2. **Guild (Server) ID**: Right-click your server name in the sidebar → **Copy Server ID**
-3. **Channel ID**: Right-click the channel you want the bot to post in → **Copy Channel ID**
-4. **Chat Relay Channel ID** *(optional)*: Right-click a second channel for in-game chat relay → **Copy Channel ID**
+- A **Project Zomboid dedicated server** with RCON enabled
+- A **Discord server** you can add a bot to
+- **Windows 10+** or **Linux** (both are supported and both are in production use)
+- **Python 3.10 or later** — only if you run from source. Tested on 3.12 and 3.13
+- **SteamCMD** — only for the `/update` command
+- **Jeeves Ecosystem mods** — only for chat relay, rank colours, airdrops and hordes
 
 ---
 
 ## Installation
 
-### Option A: Pre-Built Executable (Windows — Recommended)
+**Windows** → Option A (easiest) or Option B.
+**Linux** → Option C. There is no Linux binary; run it from source, which is how
+one of the two reference servers runs it.
 
-1. Extract the `Jeeves` folder to a location on your server machine
-2. Copy `config.env.example` to `config.env`
-3. Edit `config.env` with your settings (see [Configuration](#configuration))
+### Option A — Pre-built executable (Windows only)
+
+1. Download `Jeeves.zip` from the [Releases page](https://github.com/StewBagger/Jeeves/releases)
+2. Extract it somewhere on your server machine
+3. Copy `config.env.example` to `config.env` and fill it in (see [Configuration](#configuration))
 4. Run `Jeeves.exe`
 
-### Option B: Running from Source (Windows)
+The executable is **not** committed to this repository — it is published as a
+release attachment so it can never drift silently behind the source.
 
-1. Install [Python 3.10+](https://www.python.org/downloads/) — check **"Add Python to PATH"** during installation
-2. Open a command prompt in the JeevesBot folder
-3. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-4. Copy `config.env.example` to `config.env`
-5. Edit `config.env` with your settings
-6. Run:
-   ```
-   python Jeeves.py
-   ```
+### Option B — From source (Windows)
 
-### Option C: Running from Source (Linux — Recommended for Linux)
+```bash
+git clone https://github.com/StewBagger/Jeeves.git
+cd Jeeves
+pip install -r requirements.txt
+copy config.env.example config.env
+```
 
-1. Install Python 3.10+ if not already present:
-   ```bash
-   # Ubuntu/Debian
-   sudo apt install python3 python3-pip
-   # Fedora/RHEL
-   sudo dnf install python3 python3-pip
-   ```
-2. Copy the JeevesBot folder to your server
-3. Install dependencies:
-   ```bash
-   chmod +x install.sh run.sh
-   ./install.sh
-   ```
-4. Copy `config.env.example` to `config.env` and edit with your Linux paths:
-   ```bash
-   cp config.env.example config.env
-   nano config.env
-   ```
-5. Run:
-   ```bash
-   ./run.sh
-   ```
+Edit `config.env`, then run `run_bot.bat` (or `python Jeeves.py`).
 
-See [Running as a systemd Service](#running-as-a-systemd-service-linux) for production use on Linux.
+### Option C — From source (Linux)
+
+```bash
+git clone https://github.com/StewBagger/Jeeves.git
+cd Jeeves
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp config.env.example config.env
+```
+
+Edit `config.env`, then run `.venv/bin/python Jeeves.py`.
+
+---
+
+## Creating a Discord Bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**.
+2. Open **Bot** in the sidebar, click **Reset Token**, and copy the token — you only see it once.
+3. Under **Privileged Gateway Intents**, enable all three: **Presence**, **Server Members**, and **Message Content**.
+4. Under **OAuth2 → URL Generator**, tick the `bot` and `applications.commands` scopes, then the permissions **Send Messages**, **Embed Links**, **Read Message History** and **Use Slash Commands**.
+5. Open the generated URL, pick your server, and authorise.
+6. Enable **Developer Mode** (Discord Settings → Advanced), then right-click your server and channels to **Copy ID** for the values below.
 
 ---
 
 ## Configuration
 
-Edit `config.env` with a text editor (Notepad works fine). Every line that says `Your...` must be replaced with your actual values.
+Copy `config.env.example` to `config.env` and edit it. Lines starting with `#`
+are comments. **Never commit `config.env`** — it holds your bot token and RCON
+password, and it is gitignored for that reason.
 
-### Required Settings
-
-| Setting | Description |
-|---------|-------------|
-| `DISCORD_TOKEN` | The bot token from Step 2 of [Creating a Discord Bot](#step-2-create-the-bot-user) |
-| `DISCORD_CHANNEL_ID` | The Discord channel ID where the bot posts status messages |
-| `DISCORD_GUILD_ID` | Your Discord server ID |
-| `RCON_PASSWORD` | Must match the RCON password in your PZ server settings |
-| `RCON_PORT` | Must match the RCON port in your PZ server settings (default: 27015) |
-| `SERVER_BATCH` | Full path to your server start script (`StartServer64.bat` on Windows, `start-server.sh` on Linux) |
-| `SERVER_INI_PATH` | Full path to your server's `.ini` file (e.g., `C:\Users\You\Zomboid\Server\MyServer.ini` or `/home/pzuser/Zomboid/Server/MyServer.ini`) |
-| `MODS_FOLDER_PATH` | Path to the Workshop content folder (usually `.../steamapps/workshop/content/108600`) |
-
-### Optional Settings
+### Required
 
 | Setting | Description |
-|---------|-------------|
-| `UPDATE_LOG_PATH` | Where the bot stores mod update timestamps (default: next to the exe) |
-| `STEAMCMD_PATH` | Path to SteamCMD (`steamcmd.exe` on Windows, `/usr/games/steamcmd` on Linux) — only needed for `/update` |
-| `CHAT_RELAY_CHANNEL_ID` | Discord channel ID for bidirectional chat relay |
-| `CHAT_LOG_PATH` | Path to your PZ server's Logs folder (for chat relay) |
-| `USER_LOG_PATH` | Path to your PZ server's Logs folder (for player tracking) |
-| `DEFAULT_ROLE` | Discord role name required to use admin commands (default: "Admin") |
-| `RANK_1` through `RANK_6` | Discord role names that map to in-game rank colors |
+|---|---|
+| `DISCORD_TOKEN` | Bot token from the Developer Portal |
+| `DISCORD_CHANNEL_ID` | Channel where the bot posts status messages |
+| `DISCORD_GUILD_ID` | Your Discord server (guild) ID |
+| `RCON_HOST` | RCON host — `127.0.0.1` if the bot runs on the server machine |
+| `RCON_PORT` | RCON port (default `27015`) |
+| `RCON_PASSWORD` | RCON password, matching your server config |
+| `SERVER_BATCH` | Full path to the server start script (`StartServer64.bat` / `start-server.sh`) |
+| `SERVER_INI_PATH` | Full path to your server's `.ini` |
+| `MODS_FOLDER_PATH` | Workshop content folder for app `108600` |
 
-### Startup Timing (Optional)
-
-If your server is heavily modded or has large maps, it may need more time to start up before the bot begins checking RCON. These settings are optional — the defaults work for most servers.
+### Optional
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `STARTUP_WAIT` | `120` | Seconds to wait after launching the server before polling RCON |
-| `CHECK_INTERVAL` | `30` | Seconds between RCON retry attempts during startup monitoring |
-| `MONITOR_RETRIES` | `20` | Number of RCON retries before giving up (total wait = STARTUP_WAIT + CHECK_INTERVAL × MONITOR_RETRIES) |
+|---|---|---|
+| `UPDATE_LOG_PATH` | next to the bot | Where mod update timestamps are stored |
+| `SERVER_PROCESS_NAME` | `java.exe` / `java` | Process name for crash detection — **the Linux default is usually wrong, see below** |
+| `DEFAULT_ROLE` | `Admin` | Discord role name required for admin commands |
+| `STEAMCMD_PATH` | — | Path to SteamCMD, for `/update` and `/modadd` |
+| `STEAM_API_KEY` | — | Only needed for **unlisted** Workshop items — see below |
+| `CHAT_RELAY_CHANNEL_ID` | — | Channel for the bidirectional chat relay |
+| `CHAT_LOG_PATH` | — | Your PZ server's `Logs` folder (chat relay) |
+| `USER_LOG_PATH` | — | Your PZ server's `Logs` folder (player tracking) |
+| `STATUS_CHANNEL_ID` | — | Channel for the auto-updating status dashboard |
+| `HORDE_LEADERBOARD_CHANNEL_ID` | — | Channel for the auto-updating horde leaderboard |
+| `RANK_1` … `RANK_6` | Fuel, Spark, Cinder, Flame, Blaze, Inferno | Discord role names mapped to in-game chat colours |
+| `EMOJI_*` | Unicode fallbacks | Ten optional custom emoji overrides |
 
-For a very large server with many mods and 16+ GB heap, you might want `STARTUP_WAIT=180` and `MONITOR_RETRIES=30`.
+### Startup timing
 
-### Custom Emojis (Optional)
+| Setting | Default | Description |
+|---|---|---|
+| `STARTUP_WAIT` | `120` | Seconds to wait after launching before polling RCON |
+| `CHECK_INTERVAL` | `30` | Seconds between RCON retries |
+| `MONITOR_RETRIES` | `20` | Retries before giving up |
 
-By default, the bot uses standard Unicode emoji in its messages. If you want custom emoji (like the Project Zomboid Spiffo emotes), upload them to your Discord server, then add their IDs to config.env:
+Maximum wait is `STARTUP_WAIT + (CHECK_INTERVAL × MONITOR_RETRIES)`. For a
+heavily modded server with a large heap, try `STARTUP_WAIT=180` and
+`MONITOR_RETRIES=30`.
 
+### `SERVER_PROCESS_NAME` on Linux
+
+Crash detection looks for this name in the process table. **On Linux the default
+`java` is usually wrong.** The Build 42 dedicated server runs as
+`ProjectZomboid64`, not as a visible `java` process, so the default finds nothing
+and the bot treats a perfectly healthy server as gone. Check what yours is
+actually called:
+
+```bash
+ps aux | grep -i zomboid
 ```
-EMOJI_HAPPY=<:pzhappy:1234567890123456789>
-EMOJI_PANIC=<:pzpanic:1234567890123456789>
-```
 
-To get an emoji ID: type `\:emojiname:` in Discord chat and send it. Discord will show the raw format with the ID.
+and set `SERVER_PROCESS_NAME` to something distinctive from that line —
+`ProjectZomboid64` on a stock B42 install.
+
+Two caveats worth knowing. On Linux the match is a **substring search over the
+whole process table**, not a filtered lookup, so pick a string that cannot match
+something unrelated. And on a **managed or containerised host** the game server
+may live in a namespace the bot cannot see at all, in which case no value works —
+install Jeeve's Integration and let the bridge answer instead, as described under
+[Crash detection](#crash-detection).
+
+### `STEAM_API_KEY` and unlisted mods
+
+The update checker uses Steam's keyless endpoint first. That endpoint **cannot
+see an unlisted Workshop item at all** — Steam answers result `9` with no data.
+The local `appworkshop` manifest that covers the gap is only rewritten when the
+game server boots, which is the same event that installs the update. So without
+a key, **an unlisted mod can never be announced before the restart that already
+applied it.**
+
+If you host unlisted items, get a key at
+[steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) and set
+`STEAM_API_KEY`. Public items work fine without one.
 
 ---
 
 ## Running the Bot
 
-### First Run
+### Windows
 
-1. Make sure your PZ dedicated server is configured with RCON enabled
-2. Start `Jeeves.exe` (or `python Jeeves.py`)
-3. The bot will validate your configuration and print any errors
-4. On successful start, the bot will:
-   - Connect to Discord
-   - Check if the PZ server is running via RCON
-   - Start the server if it's offline
-   - Register slash commands (may take up to an hour on first run for Discord to propagate)
-5. Once you see "Server is Online!" in your Discord channel, the bot is fully operational
+`run_bot.bat` launches the bot from its own folder. It prefers the `py`
+launcher deliberately: a bare `python` on Windows can resolve to the Microsoft
+Store stub, whose MSIX sandbox silently hangs the subprocess spawns the bot
+needs to start the game server — it does not error, it simply never returns.
+Set `PYTHON` to pin a specific interpreter.
 
-### Running as a Service
+For unattended running, register it as a scheduled task or use
+[NSSM](https://nssm.cc/) to run it as a service. The script has no `pause` on
+purpose — under a scheduled task that would block forever on a keypress.
 
-For production use, you'll want the bot to start automatically.
-
-**Windows:**
-
-1. Create a shortcut to `Jeeves.exe`
-2. Press `Win+R`, type `shell:startup`, press Enter
-3. Move the shortcut into the Startup folder
-
-For more robust options, use [NSSM](https://nssm.cc/) to register it as a Windows service.
-
-**Linux (systemd):**
-<a name="running-as-a-systemd-service-linux"></a>
-
-Create a service file at `/etc/systemd/system/jeevesbot.service`:
+### Linux (systemd)
 
 ```ini
 [Unit]
-Description=JeevesBot — PZ Server Manager
-After=network.target
+Description=Jeeves Discord bot
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=pzuser
-WorkingDirectory=/home/pzuser/JeevesBot
-ExecStart=/usr/bin/python3 /home/pzuser/JeevesBot/Jeeves.py
+User=pzserver
+WorkingDirectory=/opt/jeeves
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/jeeves/.venv/bin/python /opt/jeeves/Jeeves.py
 Restart=on-failure
-RestartSec=10
+RestartSec=15
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Then enable and start:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable jeevesbot
-sudo systemctl start jeevesbot
-sudo systemctl status jeevesbot   # verify it's running
-sudo journalctl -u jeevesbot -f   # tail logs
-```
+`KillMode=process` is load-bearing. The bot owns the game server as a child
+process, and the default control-group kill would take the server down with
+every bot restart, dropping your players for a reason that has nothing to do
+with them.
+
+### First run
+
+Slash commands can take up to an hour to appear the first time. That is a
+Discord limitation, not a bug.
 
 ---
 
 ## Commands
 
-All slash commands require the role specified by `DEFAULT_ROLE` in your config unless noted otherwise.
+43 slash commands. Unless noted, they require the Discord role named by
+`DEFAULT_ROLE`.
 
-### Server Management
+### Server management
 
 | Command | Description |
-|---------|-------------|
-| `/online` | Check if the server is running |
-| `/start` | Start the server if it's offline |
-| `/stop` | Shut down the server |
-| `/restart` | Restart the server immediately. Use `/restart minutes:10` for a countdown |
+|---|---|
+| `/online` | Check whether the server is running |
+| `/start` | Start the server if it is offline |
+| `/stop` | Shut the server down |
+| `/restart` | Restart now, or `/restart minutes:10` for a countdown |
 | `/skip` | Skip the next scheduled automatic restart |
-| `/unskip` | Cancel a previously issued skip |
-| `/update` | Update the server via SteamCMD (requires STEAMCMD_PATH) |
+| `/unskip` | Cancel a previously issued `/skip` |
+| `/postpone` | Postpone a mod-update restart by 10 minutes |
+| `/update` | Update the server via SteamCMD |
+| `/hello` | Health check — the bot replies if it is alive |
 
-### Player Management
+### Players
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `/players` | List currently connected players |
-| `/playerlist` | Show all players who have ever joined |
+| `/playerlist` | Show everyone who has ever joined |
 | `/teleport` | Teleport one player to another |
+| `/setaccesslevel` | Set a player's server access level |
 | `/msg` | Broadcast a server-wide message |
-| `/playsound` | Trigger a JeevesIntegration sound on all clients |
+| `/playsound` | Trigger a Jeeve's Integration sound on all clients |
 
-### Mod Management
+### Mods
 
 | Command | Description |
-|---------|-------------|
-| `/mod` | Check for mod updates. Triggers a restart countdown if updates are found, otherwise confirms all mods are current |
+|---|---|
+| `/mod` | Check whether the server's mods are current — **see the warning below** |
 | `/cleanmods` | Remove unused Workshop mod folders from disk |
+| `/modadd` | Add a Workshop item: download, sort, update the INI |
+| `/modremove` | Remove a mod from the config and re-sort |
+| `/modreorder` | Re-sort the entire mod list in the INI |
+| `/modlist` | Show all mods and Workshop items in the config |
+| `/modorder` | Validate the current load order |
+| `/modsort` | Show the recommended order against the current one |
+| `/modinfo` | Detailed load-order info for one mod |
 
-### Rank System
+> ⚠️ **`/mod` is not role-gated.** Any member of your Discord can run it, and if
+> Steam reports a pending mod update it starts a real restart countdown. This is
+> how the bot has always behaved and it is left unchanged here, but you should
+> know about it. To restrict it without touching code, use Discord's own
+> **Server Settings → Integrations → JeevesBot** permissions to limit the command
+> by role or channel.
 
-| Command | Description | Permission |
-|---------|-------------|------------|
-| `/myrank` | Show your current rank and chat color | Everyone |
-| `/linkme` | Link your Discord to your PZ username | Everyone (60s cooldown) |
-| `/unlinkme` | Remove your Discord-to-PZ link | Everyone (60s cooldown) |
-| `/setrank` | Manually set a player's rank | Admin |
-| `/syncranks` | Rebuild all ranks from Discord roles | Admin |
-| `/linkname` | Link another user's Discord to their PZ name | Admin |
+### Ranks
+
+| Command | Description | Who |
+|---|---|---|
+| `/myrank` | Show your rank and chat colour | Everyone |
+| `/linkme` | Link your Discord to your PZ username | Everyone |
+| `/unlinkme` | Remove your own link | Everyone |
+| `/setrank` | Set a player's in-game rank | Admin |
+| `/syncranks` | Rebuild all ranks from Discord roles and push | Admin |
+| `/linkname` | Link another user to their PZ name | Admin |
 | `/unlinkname` | Remove another user's link | Admin |
 
-### Horde Events
+### Horde events — requires [Jeeve's Hordes](https://steamcommunity.com/sharedfiles/filedetails/?id=3672042113)
 
 | Command | Description |
-|---------|-------------|
-| `/horde count` | Spawn a manual horde with the specified zombie count |
-| `/hordeoff` | Stop an active horde and cancel any pending schedule |
-| `/hordestatus` | Show current horde state, next scheduled day, and survivor stats |
-| `/hordenight` | Force a horde night tonight with the normal 22:00 schedule |
-| `/hordereset` | Reset all horde progression — event count and all player data |
-| `/hordeclear` | Clear player horde data (buffs, immunity, streaks). Optional `username` for single player |
-| `/hordechange day` | Change the next scheduled horde to a specific world day |
-| `/leaderboard` | Show the horde survivor leaderboard |
+|---|---|
+| `/horde` | Trigger a casual horde (does not affect horde-night progression) |
+| `/hordeoff` | Stop an active horde event |
+| `/hordestatus` | Show current horde state |
+| `/hordenight` | Simulate a scheduled horde night — moodle warning, then horde at nightfall |
+| `/hordereset` | Reset progression: event count and all survivor multipliers |
+| `/hordeclear` | Clear player horde data — buffs, immunity, cooldowns, streaks |
+| `/hordechange` | Move the next scheduled horde to a specific world day |
+| `/playerreset` | Reset one player's survivor multiplier and survival count |
 
-### Airdrop Events
+### Airdrops — requires [Jeeve's Drops](https://steamcommunity.com/sharedfiles/filedetails/?id=3672451284)
 
 | Command | Description |
-|---------|-------------|
-| `/airdrop` | Trigger an airdrop. Optional `target` player and `type` (military, medical, etc.) |
-| `/supply` | Force-trigger a supply drop event |
+|---|---|
+| `/airdrop` | Trigger an airdrop on a random or specific player |
+| `/airdropstatus` | Show current airdrop status |
+| `/supplyevent` | Force a supply drop at a random map location |
+| `/supplyeventstatus` | Show current supply event status |
 
 ---
 
 ## Features
 
-### Automatic Restarts
+### Automatic restarts
+Restarts on a configurable UTC schedule, with countdown warnings broadcast
+in-game and to Discord at 10 minutes, 5 minutes, 1 minute and 10 seconds.
+`/skip` suppresses the next one.
 
-The bot restarts the server on a configurable UTC schedule (default: every 4 hours). Countdown warnings are broadcast in-game and to Discord at 10 minutes, 5 minutes, 1 minute, and 10 seconds before restart.
+### Mod update detection
+Hourly checks of every Workshop mod in your server's `.ini`. When one updates,
+the bot starts a restart countdown that `/postpone` can delay. Unlisted items
+need `STEAM_API_KEY` — see [above](#steam_api_key-and-unlisted-mods).
 
-### Mod Update Detection
+### Player counts and liveness
 
-Every hour, the bot checks all Workshop mods listed in your server's `.ini` file against Steam's API. If any mod has been updated, it triggers a restart countdown. No Steam API key is required — the bot uses Steam's public endpoint.
+Where Jeeve's Integration is installed, the bot takes the player roster from the
+mod's status file rather than from RCON. The mod builds it from
+`getOnlinePlayers()` — the engine's own list — and writes it every 30 seconds.
+RCON's `players` is the same fact printed as English prose that then has to be
+re-parsed, and a build that rewords that output returns zero players while
+reporting no error at all. A wrong zero is not harmless: it is what lets a
+restart proceed without warning anyone in the world.
 
-### Crash Detection
+Servers without the mod, or with the bridge switched off, fall back to RCON and
+behave exactly as before.
 
-A background heartbeat pings the server via RCON every 60 seconds. If the server stops responding for approximately 7.5 minutes and the process is no longer running, the bot automatically restarts it.
+### Crash detection
 
-### Chat Relay
+A heartbeat every 60 seconds and a monitor every 90. The monitor asks the mod
+bridge first: **a fresh status file proves the game loop is running**, because
+only `OnTick` writes it, whereas an RCON reply proves only that a socket handler
+answered. Those two come apart exactly when it matters — a server thrashing hard
+enough to stop ticking can still complete an RCON handshake, and a healthy
+server on a managed host can be invisible in the bot's process table.
 
-Bidirectional chat bridge between a Discord channel and in-game General chat. Requires the JeevesIntegration mod for Discord-to-game messages. Game-to-Discord works by tailing the server's chat log file.
+If the bridge is stale it falls back to the heartbeat, then to the process
+table, and only then restarts. If the world is demonstrably running but RCON has
+been silent for about 7.5 minutes, the bot **says so and restarts nothing** —
+broadcasts and `/players` will be broken until RCON recovers, but that is not a
+reason to drop everyone in the world.
 
-### Rank Synchronization
+> If you run on a managed host (AMP, Pterodactyl, or any container setup) where
+> the bot cannot see the game server in its own process table, installing
+> Jeeve's Integration is strongly recommended. Without it the bot's only
+> evidence is RCON plus a process check that cannot succeed, which is the
+> configuration most likely to restart a server that was never down.
 
-Discord roles automatically sync to in-game chat name colors via the JeevesIntegration mod. When a player's Discord role changes, their in-game rank updates in real time. Players self-link their accounts with `/linkme`.
+### Chat relay
+Bidirectional bridge between a Discord channel and in-game General chat.
+Game-to-Discord tails the server chat log. Discord-to-game needs Jeeve's
+Integration.
 
-### Jeeves Drops & Hordes Integration
+**Non-Latin scripts work.** Text going into the game is escaped to pure ASCII
+byte escapes first, because the game's Lua engine reads bridge files back
+without specifying a charset and uses the JVM platform default — which mangles
+multi-byte characters on any host whose default is not UTF-8. Escaping is
+charset-invariant, so Cyrillic, Greek, CJK and emoji all survive the trip.
 
-The bot communicates with JeevesDrops and JeevesHordes mods via a file-based Lua bridge, enabling Discord notifications for airdrop events and horde nights.
+### Rank synchronisation
+Discord roles drive in-game chat name colours through Jeeve's Integration.
+Players self-link with `/linkme`; role changes propagate in real time.
+
+### Status dashboard and leaderboard
+Two optional auto-updating embeds, each in its own channel: a server dashboard
+(status, players, next restart, in-game time, weather, next horde night) and a
+horde survivor leaderboard. Both survive brief RCON outages by holding
+last-known-good data rather than blanking.
+
+### The file bridge
+The bot talks to the Jeeves mods through files in the server's `Lua` folder —
+`jeeves_commands.txt`, `jeeves_chat.txt`, `jeeves_horde_status.txt`,
+`jeeves_drops_status.txt`.
+
+> **These are `.txt`, not `.lua`.** Build 42.20 restricted which extensions
+> `getFileWriter` will accept, so both sides moved. This bot requires the
+> current Workshop versions of the Jeeves mods; older mod versions still looking
+> for `.lua` will not see anything the bot writes.
 
 ---
 
-## Jeeves Ecosystem
+## The Jeeves Ecosystem
 
-JeevesBot is one part of the Jeeves server management suite. Each component works independently, but together they provide a complete server experience:
+JeevesBot is one part of a suite. Each mod works alone; together they share the
+bridge and the rank system.
 
-- **JeevesBot** — This Discord bot for server administration
-- **Jeeve's Integration** — In-game mod for Discord chat relay, rank colors, and sound alerts
-- **Jeeve's Hordes** — Dynamic zombie horde night events with survivor progression
-- **Jeeve's Drops** — Randomized airdrop events with guarded loot crates
-- **Jeeve's Claims** — Property and vehicle ownership system
-- **Jeeve's Journals** — Skill recovery journals for preserving progress across deaths
+**Directly integrated with this bot:**
+
+- [Jeeve's Integration](https://steamcommunity.com/sharedfiles/filedetails/?id=3660924327) — chat relay, rank colours, sound alerts. *Required for Discord-to-game features.*
+- [Jeeve's Hordes](https://steamcommunity.com/sharedfiles/filedetails/?id=3672042113) — horde night events and survivor progression
+- [Jeeve's Drops](https://steamcommunity.com/sharedfiles/filedetails/?id=3672451284) — airdrops and guarded supply crates
+
+**The rest of the suite:**
+
+[Build](https://steamcommunity.com/sharedfiles/filedetails/?id=3705530591) ·
+[Claims](https://steamcommunity.com/sharedfiles/filedetails/?id=3674013419) ·
+[Journals](https://steamcommunity.com/sharedfiles/filedetails/?id=3674452315) ·
+[PC](https://steamcommunity.com/sharedfiles/filedetails/?id=3693550188) ·
+[Patches](https://steamcommunity.com/sharedfiles/filedetails/?id=3684025083) ·
+[QoL](https://steamcommunity.com/sharedfiles/filedetails/?id=3687487317) ·
+[Solar Arrays](https://steamcommunity.com/sharedfiles/filedetails/?id=3737412008) ·
+[Zones](https://steamcommunity.com/sharedfiles/filedetails/?id=3739941052) ·
+[Everything Breaks Down](https://steamcommunity.com/sharedfiles/filedetails/?id=3749242062)
 
 ---
 
 ## Building from Source
 
-If you've made changes to the bot code and want to compile a standalone executable:
+```bash
+pip install -r requirements.txt
+pyinstaller Jeeves.spec
+```
 
-**Windows:**
+Output lands in `dist/Jeeves/`. `build.bat` (Windows) and `build.sh` (Linux)
+wrap the same call.
 
-1. Make sure Python 3.10+ is installed with pip
-2. Open a command prompt in the JeevesBot folder
-3. Run:
-   ```
-   build.bat
-   ```
-4. The compiled bot will be in `dist\Jeeves\`
-
-**Linux:**
-
-1. Make sure Python 3.10+ is installed
-2. Run:
-   ```bash
-   chmod +x build.sh
-   ./build.sh
-   ```
-3. The compiled bot will be in `dist/Jeeves/`
-
-Most Linux server administrators will not need to build — running from source with `./run.sh` is the recommended approach. The build scripts automatically install dependencies, run PyInstaller, and copy the config example into the distribution folder.
+> **If you add, rename or remove a cog, update `Jeeves.spec` as well.** Cogs load
+> via `load_extension()` on a string, which PyInstaller cannot see, so every cog
+> must also be listed in `hidden_imports`. This has bitten before: a cog rename
+> left the spec pointing at the old name, and every executable built afterwards
+> silently shipped without horde nights or the leaderboard — the bot started
+> normally and two features simply did not exist.
 
 ---
 
 ## Troubleshooting
 
-### "DISCORD_TOKEN is not set"
+**`DISCORD_TOKEN is not set`** — `config.env` is missing or not beside the bot. Copy `config.env.example` and fill it in.
 
-You forgot to copy `config.env.example` to `config.env` and fill in your bot token. See [Configuration](#configuration).
+**Slash commands don't appear** — Wait up to an hour on first run, confirm `DISCORD_GUILD_ID` is right, and check the bot was invited with the `applications.commands` scope.
 
-### Bot is online but slash commands don't appear
+**RCON connection failed** — Check `RCON_PASSWORD` and `RCON_PORT` match your server `.ini`, that RCON is enabled, and that the server has finished loading. A heavily modded server can take several minutes before RCON answers.
 
-Discord can take up to an hour to propagate slash commands after the bot's first run. If commands still don't appear after an hour, try kicking and re-inviting the bot.
+**The bot can't start the server** — Verify `SERVER_BATCH` is the full path to a start script that works when you run it by hand. On Windows, make sure a bare `python` is not resolving to the Microsoft Store stub (see [Running the Bot](#running-the-bot)).
 
-### "RCON connection failed"
+**The server crashes when the bot starts it but works manually** — Usually memory. The bot's child process inherits its environment; check the heap settings in your start script.
 
-- Make sure RCON is enabled in your PZ server settings
-- Verify the RCON port and password match between `config.env` and your server
-- Make sure the PZ server is actually running
-- Check that no firewall is blocking the RCON port (if the bot runs on a different machine)
+**Mod updates aren't detected** — Confirm `MODS_FOLDER_PATH` points at `.../steamapps/workshop/content/108600` and that the mods are listed in your server `.ini`. For unlisted items you need `STEAM_API_KEY`.
 
-### Bot can't start/stop the server
+**Chat relay doesn't work** — Game-to-Discord needs `CHAT_LOG_PATH` and `CHAT_RELAY_CHANNEL_ID`. Discord-to-game additionally needs Jeeve's Integration installed and current.
 
-**Windows:**
-- `SERVER_BATCH` must point to the exact `.bat` file you use to start your server
-- The bot must run with the same permissions as the server (if the server runs as Administrator, the bot needs to as well)
-- Make sure your batch file includes `@cd /d "%~dp0"` as the first line — this ensures the server runs from the correct directory regardless of how it's launched
+**Non-Latin characters arrive corrupted in game** — You are running a mod version older than the fix. Update Jeeve's Integration and this bot together.
 
-**Linux:**
-- `SERVER_BATCH` must point to your `start-server.sh` script (make sure it's executable: `chmod +x start-server.sh`)
-- The bot must run as the same user that owns the server files, or with sufficient permissions to start/kill the server process
-- If using systemd for both the bot and server, make sure they run as the same user
+**Custom emoji show as text** — Use the full `<:name:id>` form, and make sure the bot is in the server that owns the emoji.
 
-### Server crashes when started by the bot but works when started manually
+### Linux specifically
 
-This is usually a timing issue. The bot may start polling RCON before the server has finished initializing Steam and loading mods, which can interfere with startup on heavily modded servers. Try increasing `STARTUP_WAIT` in config.env:
+**The bot restarts a server that is plainly running** — `SERVER_PROCESS_NAME` is almost certainly still `java`. See [`SERVER_PROCESS_NAME` on Linux](#server_process_name-on-linux).
 
-```
-STARTUP_WAIT=180
-MONITOR_RETRIES=30
-```
+**Bridge commands are written but the game never acts on them** — The bot and the game server must run as the **same user**, or at least the bot must be able to write into the server's `Zomboid/Lua/` directory. Check ownership there; a bot running as `root` against a server running as `pzserver` writes files the game cannot consume.
 
-If the server still crashes immediately (within seconds of launching), check:
-- That no other java process is still running from a previous server instance (`tasklist | findstr java` on Windows, `pgrep -f zomboid` on Linux)
-- That no other application is using your server's ports (`netstat -ano | findstr :16261` on Windows, `ss -tlnp | grep 16261` on Linux)
-- That your antivirus/firewall isn't blocking a Java process spawned by another application
+**The bot dies on startup with a `UnicodeEncodeError`** — Its output includes emoji, and a service with no locale set can leave Python on an ASCII codec. Add `Environment=PYTHONIOENCODING=utf-8` to the unit, or set a UTF-8 `LANG`.
 
-### Mod updates not detecting
+**Restarting the bot service takes the game server down with it** — You are missing `KillMode=process`. See [Running the Bot](#linux-systemd).
 
-- `SERVER_INI_PATH` must point to the correct `.ini` file that contains your `WorkshopItems` list
-- Make sure `MODS_FOLDER_PATH` points to the Workshop content folder for PZ (app ID 108600)
-- The Steam API endpoint doesn't require a key but it does rate-limit — if you're getting errors, the bot will retry on the next hourly check
+**`systemctl status` shows the bot running but there are no logs** — With `StandardOutput=append:` the output goes to that file, not the journal. Without it, `journalctl -u <unit>` has everything. Pick one and know which.
 
-### Chat relay not working
+**Slash commands work but nothing appears in game** — Confirm Jeeve's Integration is installed *server-side* and that `SERVER_INI_PATH` is right: the bot derives the bridge directory from it as `<ini's parent>/../Lua`.
 
-- Game → Discord: Make sure `CHAT_LOG_PATH` points to the folder containing your server's chat log files (they look like `2024-01-15_12-00_chat.txt`)
-- Discord → Game: Requires the JeevesIntegration mod installed on the server. The bot writes to `Zomboid\Lua\jeeves_chat.lua` which the mod picks up.
+---
 
-### Custom emoji showing as text
+## Contributing
 
-If you see `<:emojiname:123456>` instead of the actual emoji, the bot doesn't have access to that emoji. Make sure the emoji is uploaded to the same Discord server the bot is in, and the emoji IDs in config.env are correct.
+Issues and pull requests are welcome.
+
+One thing worth knowing before you touch `server_update.py`: the SteamCMD branch
+is `public`, and that is deliberate. B42 was promoted to stable and Steam
+**retired** the `unstable` branch for app `380870` entirely. Pointing at it fed
+SteamCMD a branch that does not exist, which pinned the install to an orphaned
+build and left a server running 42.19 for five hours while every update reported
+success. The branch is also passed on every invocation on purpose — omitting
+`-beta` inherits whatever the install's own manifest already records, so a stale
+pin survives silently. Check Steam's real branch list before changing it.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 StewBagger

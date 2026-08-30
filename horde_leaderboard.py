@@ -4,7 +4,7 @@ Horde Night Leaderboard Extension
 Maintains a single auto-updating Discord embed in a dedicated channel showing
 players ranked by their horde night survivor multiplier (highest first).
 
-Refreshes once per minute by reading the jeeves_horde_survivors.lua bridge file.
+Refreshes once per minute by reading the jeeves_horde_survivors.txt bridge file.
 
 Config:
   HORDE_LEADERBOARD_CHANNEL_ID=  (Discord channel ID for the leaderboard embed)

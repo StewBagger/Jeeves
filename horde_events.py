@@ -5,7 +5,7 @@ Provides /horde, /hordeoff, /hordestatus, /hordenight, /hordereset, /hordeclear,
 that write commands via the unified lua_bridge module, which the JeevesHordes
 server mod reads.
 
-Also runs a background task that polls jeeves_horde_status.lua written by the
+Also runs a background task that polls jeeves_horde_status.txt written by the
 server mod, and sends Discord notifications at three key horde phases:
   1) "scheduled" — Horde night announced (7am in-game on the day)
   2) "active"    — Horde night has begun (zombies spawning)
@@ -62,7 +62,7 @@ class JeevesHordesCog(commands.Cog):
 
     @tasks.loop(seconds=15)
     async def horde_status_poller(self):
-        """Poll jeeves_horde_status.lua and send Discord notifications."""
+        """Poll jeeves_horde_status.txt and send Discord notifications."""
         try:
             status = lua_bridge.read_horde_status()
             if not status:

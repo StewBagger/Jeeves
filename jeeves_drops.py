@@ -2,7 +2,7 @@
 jeeves_drops.py — Discord bot cog for Jeeve's Drops mod integration.
 
 Provides /airdrop and /airdropstatus slash commands.
-Supports crate type selection: military, medical, materials, fooddrink, toolsmelee
+Supports crate type selection: military, medical, materials, fooddrink, toolsmelee, literature
 
 Add to Jeeves bot:
   1. Place this file alongside Jeeves.py
@@ -23,6 +23,7 @@ CRATE_TYPES = [
     app_commands.Choice(name="Materials",   value="materials"),
     app_commands.Choice(name="Food/Drink",  value="fooddrink"),
     app_commands.Choice(name="Tools/Melee", value="toolsmelee"),
+    app_commands.Choice(name="Literature/Entertainment", value="literature"),
 ]
 
 CRATE_EMOJIS = {
@@ -31,6 +32,7 @@ CRATE_EMOJIS = {
     "Materials":   "🧱",
     "Food/Drink":  "🍖",
     "Tools/Melee": "🔧",
+    "Literature/Entertainment": "📚",
 }
 
 
