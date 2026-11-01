@@ -55,6 +55,7 @@ except ImportError:
     sys.exit("ERROR: httpx package not installed. Install with: pip install httpx")
 
 import lua_bridge
+from server_exit import server_process_running, wait_for_exit
 
 
 # =============================================================================
@@ -88,6 +89,7 @@ class Config:
         self.STARTUP_WAIT = _env_int('STARTUP_WAIT', 120)
         self.CHECK_INTERVAL = _env_int('CHECK_INTERVAL', 30)
         self.MONITOR_RETRIES = _env_int('MONITOR_RETRIES', 20)
+        self.SERVER_STOP_TIMEOUT = _env_int('SERVER_STOP_TIMEOUT', 120)
 
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
@@ -739,8 +741,17 @@ class PZBot(commands.Bot):
 
         proc = self.config.SERVER_PROCESS_NAME
 
+        # `quit` saves and exits on its own schedule. Force only a server that has
+        # not gone by the timeout, rather than at a flat 8s after quit.
+        exited = await wait_for_exit(lambda: server_process_running(proc),
+                                     self.config.SERVER_STOP_TIMEOUT)
+        if not exited:
+            print(f"[ServerControl] {proc} still running after "
+                  f"{self.config.SERVER_STOP_TIMEOUT}s, forcing it down.")
+
         if _IS_WINDOWS:
-            _taskkill(f'/im "{proc}"')
+            if not exited:
+                _taskkill(f'/im "{proc}"')
 
             for pid in filter(None, {getattr(self, '_batch_pid', None),
                                       getattr(self.server_process, 'pid', None)}):
@@ -759,15 +770,18 @@ class PZBot(commands.Bot):
                 except (ProcessLookupError, PermissionError):
                     pass
             # Fallback: pkill by process name
-            try:
-                subprocess.run(['pkill', '-f', proc],
-                               capture_output=True, timeout=5)
-            except Exception:
-                pass
+            if not exited:
+                try:
+                    subprocess.run(['pkill', '-f', proc],
+                                   capture_output=True, timeout=5)
+                except Exception:
+                    pass
 
         self._batch_pid = None
         self.server_process = None
 
+        if not exited:
+            await wait_for_exit(lambda: server_process_running(proc), 30)
         await asyncio.sleep(2)
         print("[ServerControl] Stop complete.")
 
@@ -785,6 +799,17 @@ class PZBot(commands.Bot):
         print("[ServerControl] Restarting...")
         await self.stop_server()
         await asyncio.sleep(5)
+        proc = self.config.SERVER_PROCESS_NAME
+        if await asyncio.to_thread(server_process_running, proc):
+            # Two servers on one world is the failure this path exists to prevent.
+            print(f"[ServerControl] {proc} survived the stop; not starting a second server.")
+            await self.send_notification(
+                f"{Emojis.PANIC} Restart stopped: the old server would not exit.",
+                discord.Colour.red(),
+                description="No new server was started. Check the box before starting it."
+            )
+            self.state.is_restarting = False
+            return
         await self.start_server()
         self.state.is_restarting = False
 

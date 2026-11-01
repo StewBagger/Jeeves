@@ -35,6 +35,7 @@ hidden_imports = [
     'horde_leaderboard',
     # --- plain modules imported by the cogs ---
     'lua_bridge',
+    'server_exit',
     'mod_sorter',
     'workshop_acf',
 ]
